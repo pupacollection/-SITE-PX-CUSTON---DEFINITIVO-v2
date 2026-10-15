@@ -60,25 +60,39 @@ async function main() {
     process.exit(1);
   }
 
-  // 3. Atualizar metadata no auth
-  await supabaseAdmin.auth.admin.updateUserById(user.id, {
-    user_metadata: { ...user.user_metadata, role: 'SUPER_ADMIN' },
-  });
+  // 3. Promover usando a função segura já existente no Supabase
+const normalizedEmail = targetEmail.trim().toLowerCase();
 
-  // 4. Atualizar em public.profiles
-  const { error: profileError } = await supabaseAdmin
-    .from('profiles')
-    .update({ role: 'SUPER_ADMIN', updated_at: new Date().toISOString() })
-    .eq('id', user.id);
+const { data, error } = await supabaseAdmin.rpc(
+  'promote_first_super_admin',
+  { target_email: normalizedEmail }
+);
 
-  if (profileError) {
-    console.warn('⚠️ Perfil público ainda não existe no banco (será sincronizado assim que a tabela for criada).');
-  }
-
-  console.log(`✅ SUCESSO: Usuário "${targetEmail}" (ID: ${user.id}) promovido com sucesso ao papel de primeiro SUPER_ADMIN oficial da PX CUSTON!`);
+if (error) {
+  console.error('❌ Falha ao promover SUPER_ADMIN:', error.message);
+  process.exit(1);
 }
 
-main().catch((err) => {
-  console.error('❌ Falha inesperada:', err);
+// 4. Confirmar o papel no perfil público
+const { data: profile, error: verifyError } = await supabaseAdmin
+  .from('profiles')
+  .select('id, email, role')
+  .eq('id', user.id)
+  .maybeSingle();
+
+if (verifyError) {
+  console.error('❌ Erro ao verificar o perfil:', verifyError.message);
   process.exit(1);
-});
+}
+
+if (profile?.role !== 'SUPER_ADMIN') {
+  console.error(
+    '❌ A promoção não foi confirmada. Retorno da função:',
+    data
+  );
+  process.exit(1);
+}
+
+console.log(
+  `✅ SUPER_ADMIN confirmado: ${profile.email} (ID: ${profile.id})`
+);
