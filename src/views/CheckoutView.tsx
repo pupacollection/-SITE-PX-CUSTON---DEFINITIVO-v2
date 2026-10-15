@@ -34,6 +34,9 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const [buyerName, setBuyerName] = useState(user?.full_name || 'Deivid J. Silva');
   const [buyerEmail, setBuyerEmail] = useState(user?.email || 'deivid@gmail.com');
   const [buyerCpf, setBuyerCpf] = useState('123.456.789-00');
+  const [registeredOrder, setRegisteredOrder] = useState<any | null>(null);
+  const [orderError, setOrderError] = useState<string | null>(null);
+  const [copiedPix, setCopiedPix] = useState(false);
 
   // Compute totals
   const subtotal = selectedBatches.reduce(
@@ -45,44 +48,54 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const total = Math.max(0, subtotal + convenienceFee - pixDiscount);
 
   const handleCheckout = async () => {
+    setOrderError(null);
+
+    // 1. Bloqueio Estrito no Frontend: Eventos de demonstração não podem aceitar pedidos comerciais
+    if (event.is_demo) {
+      setOrderError(
+        'Operação bloqueada: Eventos marcados como demonstrativos (DEMO) destinam-se exclusivamente à homologação técnica e não aceitam pagamentos ou vendas reais.'
+      );
+      return;
+    }
+
     setProcessing(true);
 
-    // Call backend API or process verified payment
     try {
-      // In production this connects to backend /api/payments/create-preference
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-
-      // Generate verified tickets
-      const generatedTickets: Ticket[] = [];
-      const timestampSuffix = Date.now().toString(36).toUpperCase().slice(-5);
-
-      selectedBatches.forEach((item, bIndex) => {
-        for (let i = 0; i < item.quantity; i++) {
-          const code = `PX-7AI${bIndex}${i}${timestampSuffix}`;
-          generatedTickets.push({
-            id: `tkt-${Date.now()}-${bIndex}-${i}`,
-            code,
-            order_id: `ord-${Date.now()}`,
-            user_id: user?.id || 'usr-guest',
-            event_id: event.id,
+      // 2. Registro oficial do pedido no backend com cálculo autoritativo
+      const response = await fetch('/api/orders/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          event_id: event.id,
+          event_title: event.title,
+          items: selectedBatches.map((item) => ({
             batch_id: item.batch.id,
-            event_title: event.title,
-            event_date: `${event.formatted_date} - ${event.city}/${event.state}`,
-            event_location: `${event.location}, ${event.city}/${event.state}`,
             batch_name: item.batch.name,
-            holder_name: buyerName,
-            holder_doc: buyerCpf,
-            price: item.batch.price,
-            status: 'paid',
-            qr_payload: `PXCUSTON:TKT:${code}:${event.id}:${encodeURIComponent(buyerName)}`,
-            created_at: new Date().toISOString(),
-          });
-        }
+            unit_price: item.batch.price,
+            quantity: item.quantity,
+          })),
+          buyer: {
+            name: buyerName,
+            email: buyerEmail,
+            cpf: buyerCpf,
+          },
+          payment_method: selectedMethod,
+        }),
       });
 
-      onSuccess(generatedTickets);
-    } catch (err) {
-      console.error('Erro ao processar pagamento:', err);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Falha ao registrar pedido no servidor.');
+      }
+
+      // O pedido é registrado como PENDENTE. O frontend NUNCA emite ingressos pagos diretamente.
+      setRegisteredOrder(data);
+    } catch (err: any) {
+      console.error('Erro ao processar pedido:', err);
+      setOrderError(err.message || 'Erro de conexão ao processar pedido.');
     } finally {
       setProcessing(false);
     }
@@ -103,26 +116,148 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           <div className="w-12 h-px bg-[#FF1A2D]"></div>
 
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-full bg-[#FF1A2D] text-white font-bold text-xs flex items-center justify-center shadow-[0_0_10px_rgba(255,26,45,0.6)]">
-              2
+            <div className={`w-7 h-7 rounded-full text-xs font-bold flex items-center justify-center ${
+              registeredOrder
+                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                : 'bg-[#FF1A2D] text-white shadow-[0_0_10px_rgba(255,26,45,0.6)]'
+            }`}>
+              {registeredOrder ? '✓' : '2'}
             </div>
-            <span className="text-xs font-bold text-white uppercase tracking-wider">
+            <span className={`text-xs uppercase tracking-wider ${registeredOrder ? 'text-zinc-400' : 'font-bold text-white'}`}>
               2. Pagamento
             </span>
           </div>
 
-          <div className="w-12 h-px bg-[#262626]"></div>
+          <div className={`w-12 h-px ${registeredOrder ? 'bg-[#FF1A2D]' : 'bg-[#262626]'}`}></div>
 
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-full bg-[#181818] border border-[#333] text-zinc-500 text-xs font-bold flex items-center justify-center">
+            <div className={`w-7 h-7 rounded-full text-xs font-bold flex items-center justify-center ${
+              registeredOrder
+                ? 'bg-[#FF1A2D] text-white shadow-[0_0_10px_rgba(255,26,45,0.6)]'
+                : 'bg-[#181818] border border-[#333] text-zinc-500'
+            }`}>
               3
             </div>
-            <span className="text-xs text-zinc-500">3. Confirmação</span>
+            <span className={`text-xs ${registeredOrder ? 'font-bold text-white uppercase tracking-wider' : 'text-zinc-500'}`}>
+              3. Confirmação
+            </span>
           </div>
         </div>
 
-        {/* Content Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
+        {/* Notificação de Evento Demonstrativo */}
+        {event.is_demo && (
+          <div className="bg-amber-950/40 border border-amber-500/40 p-4 rounded-2xl flex items-center gap-3 text-amber-200 text-xs">
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+            <div>
+              <span className="font-bold uppercase tracking-wider block">Evento de Demonstração (Homologação Técnica)</span>
+              <span className="text-zinc-300">
+                Este evento possui caráter puramente demonstrativo (is_demo = true). Compras comerciais e emissão de ingressos oficiais estão desabilitadas para demonstrações.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Mensagem de Erro */}
+        {orderError && (
+          <div className="bg-red-950/40 border border-[#FF1A2D]/40 p-4 rounded-2xl flex items-center gap-3 text-red-200 text-xs">
+            <AlertCircle className="w-5 h-5 text-[#FF1A2D] shrink-0" />
+            <span>{orderError}</span>
+          </div>
+        )}
+
+        {/* TELA DE PEDIDO REGISTRADO (STATUS PENDENTE) */}
+        {registeredOrder ? (
+          <div className="bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8 space-y-6 max-w-2xl mx-auto">
+            <div className="text-center space-y-2">
+              <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center mx-auto">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <h2 className="text-xl font-black uppercase text-white font-heading">
+                Pedido Registrado com Sucesso!
+              </h2>
+              <p className="text-xs text-zinc-400">
+                Código do Pedido: <span className="font-mono text-white font-bold">{registeredOrder.order?.id}</span>
+              </p>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 border border-amber-500/30 rounded-full text-amber-300 text-xs font-semibold">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                <span>Aguardando Confirmação do Pagamento</span>
+              </div>
+            </div>
+
+            {/* Detalhes do Pagamento */}
+            <div className="bg-[#181818] border border-[#262626] rounded-2xl p-5 space-y-4">
+              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
+                <span className="text-zinc-400">Evento:</span>
+                <span className="font-bold text-white">{event.title}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
+                <span className="text-zinc-400">Valor Total:</span>
+                <span className="font-bold text-[#FF1A2D] text-sm">
+                  R$ {registeredOrder.order?.total?.toFixed(2)?.replace('.', ',')}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
+                <span className="text-zinc-400">Forma de Pagamento:</span>
+                <span className="font-bold uppercase text-white">{registeredOrder.order?.payment_method}</span>
+              </div>
+
+              {registeredOrder.payment?.pix_copy_paste && (
+                <div className="pt-2 space-y-2">
+                  <label className="text-[10px] text-zinc-400 uppercase font-semibold block">
+                    Código Pix Copia e Cola
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={registeredOrder.payment.pix_copy_paste}
+                      className="w-full bg-[#111] border border-[#333] rounded-xl px-3 py-2 text-xs font-mono text-zinc-300 select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(registeredOrder.payment.pix_copy_paste);
+                        setCopiedPix(true);
+                        setTimeout(() => setCopiedPix(false), 3000);
+                      }}
+                      className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold px-4 py-2 rounded-xl whitespace-nowrap transition"
+                    >
+                      {copiedPix ? 'Copiado!' : 'Copiar Pix'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Aviso de Segurança de Emissão Real */}
+            <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl flex items-start gap-3 text-xs text-zinc-400">
+              <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold text-zinc-200 block mb-0.5">Liberação Autoritativa de Ingressos</span>
+                <span>
+                  O ingresso oficial e o QR Code de validação serão emitidos no sistema após a confirmação automática enviada pelo Mercado Pago. Você poderá consultar seus ingressos a qualquer momento na sua conta.
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3 pt-2">
+              <button
+                onClick={() => onNavigate('profile')}
+                className="flex-1 bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider py-3 rounded-xl transition text-center"
+              >
+                Acompanhar no Meu Perfil
+              </button>
+              <button
+                onClick={() => onNavigate('events')}
+                className="flex-1 bg-[#181818] border border-[#2a2a2a] hover:bg-[#222] text-zinc-300 text-xs font-semibold py-3 rounded-xl transition text-center"
+              >
+                Voltar aos Eventos
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* Content Grid */
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
           {/* Left Column: Resumo do Pedido */}
           <div className="md:col-span-5 bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-7 space-y-5">
             <h3 className="text-sm font-black uppercase tracking-wider text-white font-heading">
@@ -337,10 +472,12 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             <div className="pt-4 space-y-3">
               <button
                 onClick={handleCheckout}
-                disabled={processing || subtotal === 0}
+                disabled={processing || subtotal === 0 || event.is_demo}
                 className="w-full bg-[#FF1A2D] hover:bg-[#e00f21] disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wider py-3.5 rounded-xl shadow-[0_0_20px_rgba(255,26,45,0.45)] transition transform hover:-translate-y-0.5 flex items-center justify-center gap-2"
               >
-                {processing ? (
+                {event.is_demo ? (
+                  <span>Compra Bloqueada (Evento de Homologação)</span>
+                ) : processing ? (
                   <span>Processando com Mercado Pago...</span>
                 ) : (
                   <>
@@ -357,6 +494,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

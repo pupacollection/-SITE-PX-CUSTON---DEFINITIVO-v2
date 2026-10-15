@@ -102,8 +102,16 @@ export const EventsCatalogView: React.FC<EventsCatalogViewProps> = ({
                     className="w-full h-full object-cover group-hover:scale-105 transition duration-500"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-[#121212] via-transparent to-transparent" />
-                  <div className="absolute top-3 left-3 bg-[#FF1A2D] text-white text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded shadow">
-                    PX CUSTON
+                  <div className="absolute top-3 left-3 flex items-center gap-1.5">
+                    {evt.is_demo ? (
+                      <span className="bg-amber-600/90 text-white text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded shadow">
+                        DEMO / HOMOLOGAÇÃO
+                      </span>
+                    ) : (
+                      <span className="bg-[#FF1A2D] text-white text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded shadow">
+                        OFICIAL PX
+                      </span>
+                    )}
                   </div>
                   <div className="absolute bottom-3 left-3 text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
                     <Calendar className="w-3.5 h-3.5 text-[#FF1A2D]" />

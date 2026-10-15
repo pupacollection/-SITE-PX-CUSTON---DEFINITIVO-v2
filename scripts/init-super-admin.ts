@@ -6,8 +6,16 @@ dotenv.config();
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!supabaseUrl || !supabaseSecretKey) {
-  console.error('❌ Erro: SUPABASE_URL e SUPABASE_SECRET_KEY devem estar configurados no .env para executar este comando.');
+const isSecretKeyPlaceholder =
+  !supabaseSecretKey ||
+  supabaseSecretKey.includes('placeholder') ||
+  supabaseSecretKey.includes('dummy') ||
+  supabaseSecretKey.includes('sua_chave') ||
+  supabaseSecretKey.length < 20;
+
+if (!supabaseUrl || isSecretKeyPlaceholder) {
+  console.error('❌ Erro de Segurança: SUPABASE_URL e uma SUPABASE_SECRET_KEY válida devem estar configuradas no .env para executar este comando.');
+  console.error('ℹ️ A chave deve ser a service_role secret do projeto Supabase. Placeholders ou chaves de demonstração não são aceitos.');
   process.exit(1);
 }
 

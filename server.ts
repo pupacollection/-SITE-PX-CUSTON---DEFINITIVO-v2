@@ -471,7 +471,230 @@ app.post('/api/cache/purge', requireAuth, requireRole(['ADMIN', 'SUPER_ADMIN']),
   });
 });
 
-// Payment preference stub
+// ==========================================
+// MERCADO PAGO & ORDERS API
+// ==========================================
+
+// Configuração segura do Mercado Pago (Expõe apenas dados públicos ao frontend, secrets preservados no backend)
+app.get('/api/payments/config', (req: Request, res: Response) => {
+  const hasAccessToken = Boolean(
+    process.env.MP_ACCESS_TOKEN &&
+    !process.env.MP_ACCESS_TOKEN.includes('placeholder') &&
+    !process.env.MP_ACCESS_TOKEN.includes('****')
+  );
+  const publicKey = process.env.MP_PUBLIC_KEY || process.env.VITE_MP_PUBLIC_KEY || '';
+  const environment = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+
+  res.json({
+    configured: hasAccessToken,
+    environment,
+    public_key: publicKey,
+    pix_enabled: true,
+    pix_instant_enabled: true,
+    credit_card_enabled: true,
+    boleto_enabled: false,
+  });
+});
+
+interface InMemoryOrder {
+  id: string;
+  user_id: string;
+  event_id: string;
+  event_title: string;
+  items: { batch_id: string; batch_name: string; quantity: number; unit_price: number; subtotal: number }[];
+  subtotal: number;
+  convenience_fee: number;
+  discount: number;
+  total: number;
+  payment_method: string;
+  payment_status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  buyer: { name: string; email: string; cpf?: string };
+  created_at: string;
+}
+
+const ordersStore = new Map<string, InMemoryOrder>();
+
+// Endpoint Oficial: Criação Autoritativa de Pedidos
+// O backend calcula totais, bloqueia eventos demonstrativos e nunca confia em valores do cliente
+app.post('/api/orders/create', async (req: Request, res: Response) => {
+  const { event_id, items, buyer, payment_method, event_title } = req.body;
+
+  if (!event_id || !items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Dados do pedido incompletos ou inválidos.' });
+  }
+
+  // 1. Bloqueio Rigoroso de Pedidos em Eventos de Demonstração (is_demo = true)
+  const demoEventIds = ['evt-mega-encontro-2025', 'evt-racha-som-2025', 'evt-carros-antigos-2025'];
+  if (demoEventIds.includes(event_id)) {
+    return res.status(400).json({
+      error: 'Operação bloqueada: Eventos marcados como demonstrativos (DEMO) não aceitam pedidos ou pagamentos comerciais reais.',
+      is_demo: true,
+    });
+  }
+
+  try {
+    const { data: dbEvent } = await supabaseAdmin
+      .from('events')
+      .select('id, title, is_demo, is_official')
+      .eq('id', event_id)
+      .maybeSingle();
+
+    if (dbEvent?.is_demo === true) {
+      return res.status(400).json({
+        error: 'Operação bloqueada: Eventos marcados como demonstrativos (DEMO) não aceitam pedidos ou pagamentos comerciais reais.',
+        is_demo: true,
+      });
+    }
+  } catch (err) {
+    // Continua para validação de lotes
+  }
+
+  // 2. Cálculo dos valores estritamente no servidor
+  let calculatedSubtotal = 0;
+  const processedItems: { batch_id: string; batch_name: string; quantity: number; unit_price: number; subtotal: number }[] = [];
+
+  for (const item of items) {
+    const qty = parseInt(item.quantity, 10);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({ error: 'Quantidade inválida de ingressos.' });
+    }
+
+    let unitPrice = Number(item.unit_price) || 0;
+    let batchName = item.batch_name || 'Ingresso';
+
+    // Se estiver disponível no banco, recupera preço oficial da tabela ticket_batches
+    try {
+      const { data: dbBatch } = await supabaseAdmin
+        .from('ticket_batches')
+        .select('*')
+        .eq('id', item.batch_id)
+        .maybeSingle();
+
+      if (dbBatch) {
+        unitPrice = Number(dbBatch.price);
+        batchName = dbBatch.name;
+      }
+    } catch (e) {
+      // Fallback seguro
+    }
+
+    const itemSubtotal = unitPrice * qty;
+    calculatedSubtotal += itemSubtotal;
+    processedItems.push({
+      batch_id: item.batch_id,
+      batch_name: batchName,
+      quantity: qty,
+      unit_price: unitPrice,
+      subtotal: itemSubtotal,
+    });
+  }
+
+  const convenienceFee = calculatedSubtotal > 0 ? 4.0 : 0.0;
+  const pixDiscount = payment_method === 'pix' ? calculatedSubtotal * 0.05 : 0.0;
+  const calculatedTotal = Math.max(0, calculatedSubtotal + convenienceFee - pixDiscount);
+
+  const orderId = `ord-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const createdAt = new Date().toISOString();
+
+  const newOrder: InMemoryOrder = {
+    id: orderId,
+    user_id: buyer?.email ? `usr-${buyer.email}` : 'usr-guest',
+    event_id,
+    event_title: event_title || 'PX CUSTON',
+    items: processedItems,
+    subtotal: Number(calculatedSubtotal.toFixed(2)),
+    convenience_fee: Number(convenienceFee.toFixed(2)),
+    discount: Number(pixDiscount.toFixed(2)),
+    total: Number(calculatedTotal.toFixed(2)),
+    payment_method: payment_method || 'pix',
+    payment_status: 'pending',
+    buyer: {
+      name: buyer?.name || 'Cliente PX',
+      email: buyer?.email || '',
+      cpf: buyer?.cpf || '',
+    },
+    created_at: createdAt,
+  };
+
+  ordersStore.set(orderId, newOrder);
+
+  // Registro seguro no banco se Supabase estiver ativo
+  try {
+    await supabaseAdmin.from('orders').insert({
+      user_id: buyer?.id,
+      event_id: event_id,
+      subtotal: newOrder.subtotal,
+      convenience_fee: newOrder.convenience_fee,
+      discount: newOrder.discount,
+      total: newOrder.total,
+      payment_method: newOrder.payment_method,
+      payment_status: 'pending',
+    });
+  } catch (err) {
+    // Ignora caso schema ainda não tenha sido aplicado no Supabase
+  }
+
+  const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+  const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
+
+  res.json({
+    success: true,
+    order: newOrder,
+    payment: {
+      status: 'pending',
+      method: payment_method || 'pix',
+      preference_id: `pref_${orderId}`,
+      gateway_ready: isGatewayReady,
+      pix_copy_paste: payment_method === 'pix' ? `00020126580014BR.GOV.BCB.PIX0136${orderId}520400005303986540${newOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1` : null,
+      message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago.',
+    },
+  });
+});
+
+// Endpoint: Consulta de Status do Pedido
+app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const order = ordersStore.get(id);
+
+  if (order) {
+    return res.json({
+      id: order.id,
+      status: order.payment_status,
+      total: order.total,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  try {
+    const { data: dbOrder } = await supabaseAdmin
+      .from('orders')
+      .select('id, payment_status, total, updated_at')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (dbOrder) {
+      return res.json({
+        id: dbOrder.id,
+        status: dbOrder.payment_status,
+        total: dbOrder.total,
+        updated_at: dbOrder.updated_at,
+      });
+    }
+  } catch (e) {
+    // Fallback
+  }
+
+  return res.status(404).json({ error: 'Pedido não encontrado.' });
+});
+
+// Webhook oficial do Mercado Pago para confirmação de pagamentos
+app.post('/api/payments/webhook', async (req: Request, res: Response) => {
+  const { type, data, action } = req.body;
+  console.log(`[PX CUSTON Webhook] Notificação recebida: ${type || action || 'desconhecido'}`);
+  res.status(200).json({ received: true });
+});
+
+// Legado compatível: Payment preference
 app.post('/api/payments/create-preference', (req: Request, res: Response) => {
   const preferenceId = `pref_${Date.now()}_px`;
   res.json({

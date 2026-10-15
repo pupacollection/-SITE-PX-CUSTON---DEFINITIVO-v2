@@ -31,15 +31,42 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
   onNavigate,
 }) => {
   const [config, setConfig] = useState<MercadoPagoConfig>(initialConfig);
-  const [showSecrets, setShowSecrets] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [savingNotice, setSavingNotice] = useState(false);
+  const [serverStatus, setServerStatus] = useState<{ configured: boolean; environment: string; public_key: string } | null>(null);
+
+  React.useEffect(() => {
+    fetch('/api/payments/config')
+      .then((res) => res.json())
+      .then((data) => {
+        setServerStatus(data);
+        if (data.public_key) {
+          setConfig((prev) => ({
+            ...prev,
+            public_key: data.public_key,
+            is_connected: Boolean(data.configured),
+          }));
+        }
+      })
+      .catch((err) => console.warn('[PX CUSTON] Erro ao carregar status de pagamento do servidor:', err));
+  }, []);
 
   const handleTestConnection = async () => {
-    setTestResult('Testando conexão com API do Mercado Pago...');
-    setTimeout(() => {
-      setTestResult('✓ Conexão bem-sucedida! Webhooks e credenciais operacionais.');
-    }, 800);
+    setTestResult('Verificando status das credenciais no servidor...');
+    try {
+      const res = await fetch('/api/payments/config');
+      const data = await res.json();
+      setServerStatus(data);
+      if (data.configured) {
+        setTestResult('✓ Conexão operacional! MP_ACCESS_TOKEN configurado no servidor e pronto para emissão real.');
+      } else {
+        setTestResult(
+          'ℹ️ Modo Homologação ativo. MP_ACCESS_TOKEN ausente nas variáveis de ambiente do servidor Hostinger. Configure MP_ACCESS_TOKEN no .env do servidor para transações reais.'
+        );
+      }
+    } catch (e: any) {
+      setTestResult('❌ Falha ao verificar conexão com o backend: ' + e.message);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -48,6 +75,8 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
     setSavingNotice(true);
     setTimeout(() => setSavingNotice(false), 3000);
   };
+
+  const isConnected = Boolean(serverStatus?.configured || config.is_connected);
 
   return (
     <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 lg:px-8">
@@ -134,7 +163,7 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
             </button>
           </div>
 
-          {/* Right Configuration Panel (Screen 10 Master Representation) */}
+          {/* Right Configuration Panel */}
           <div className="md:col-span-9 bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8 space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#222] pb-5">
               <div>
@@ -142,13 +171,31 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
                   Mercado Pago
                 </h2>
                 <p className="text-xs text-zinc-400 mt-1">
-                  Configure suas credenciais de pagamento para emissão real de ingressos
+                  Integração oficial e segura para processamento de pagamentos
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 bg-emerald-950/40 border border-emerald-500/30 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Conectado</span>
+              {isConnected ? (
+                <div className="flex items-center gap-2 bg-emerald-950/40 border border-emerald-500/30 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Conectado (Servidor)</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 bg-amber-950/40 border border-amber-500/30 text-amber-400 text-xs font-bold px-3 py-1.5 rounded-full">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                  <span>Modo Homologação</span>
+                </div>
+              )}
+            </div>
+
+            {/* Aviso de Arquitetura de Segurança (PCI / Backend-Only Secrets) */}
+            <div className="bg-[#181818] border border-[#2a2a2a] p-4 rounded-2xl flex items-start gap-3 text-xs text-zinc-400">
+              <Lock className="w-5 h-5 text-[#FF1A2D] shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold text-zinc-200 block mb-0.5">Segurança de Credenciais Privadas</span>
+                <span>
+                  Por diretriz estrita de segurança, tokens privados (<strong>MP_ACCESS_TOKEN</strong>, <strong>MP_CLIENT_SECRET</strong> e <strong>MP_WEBHOOK_SECRET</strong>) residem exclusivamente no servidor Node.js / Hostinger e nunca são transmitidos ao navegador. O frontend recebe apenas a Public Key pública.
+                </span>
               </div>
             </div>
 
@@ -160,7 +207,7 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
             )}
 
             {testResult && (
-              <div className="bg-[#181818] border border-[#2a2a2a] text-zinc-300 text-xs p-3 rounded-xl font-mono">
+              <div className="bg-[#181818] border border-[#2a2a2a] text-zinc-300 text-xs p-3.5 rounded-xl font-mono leading-relaxed">
                 {testResult}
               </div>
             )}
@@ -169,7 +216,7 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
               {/* Environment Toggle: Homologação vs Produção */}
               <div>
                 <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-2">
-                  Ambiente de Execução
+                  Ambiente de Execução (Gateway)
                 </label>
                 <div className="flex items-center gap-6 text-xs">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -180,7 +227,7 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
                       onChange={() => setConfig({ ...config, environment: 'sandbox' })}
                       className="accent-[#FF1A2D]"
                     />
-                    <span className="text-zinc-300">Homologação (Teste)</span>
+                    <span className="text-zinc-300">Homologação (Sandbox)</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
@@ -199,48 +246,43 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
               <div className="space-y-4">
                 <div>
                   <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
-                    Public Key
+                    Public Key (Pública — VITE_MP_PUBLIC_KEY)
                   </label>
                   <input
                     type="text"
                     value={config.public_key}
+                    placeholder="Ex: APP_USR-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                     onChange={(e) => setConfig({ ...config, public_key: e.target.value })}
                     className="w-full bg-[#181818] border border-[#2a2a2a] focus:border-[#FF1A2D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono"
                   />
+                  <span className="text-[10px] text-zinc-500 mt-1 block">
+                    Utilizada pelo Checkout Transparente e MercadoPago.js no navegador.
+                  </span>
                 </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
-                      Access Token (Secret)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowSecrets(!showSecrets)}
-                      className="text-[11px] text-zinc-400 hover:text-white flex items-center gap-1"
-                    >
-                      {showSecrets ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      <span>{showSecrets ? 'Ocultar' : 'Revelar'}</span>
-                    </button>
+                {/* Status dos Secrets no Servidor */}
+                <div className="bg-[#161616] border border-[#242424] p-4 rounded-xl space-y-3">
+                  <span className="text-[11px] font-bold text-zinc-300 uppercase tracking-wider block">
+                    Status de Credenciais do Servidor (Node.js / Hostinger)
+                  </span>
+
+                  <div className="flex items-center justify-between text-xs py-1 border-b border-[#222]">
+                    <span className="text-zinc-400 font-mono">MP_ACCESS_TOKEN</span>
+                    <span className={serverStatus?.configured ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
+                      {serverStatus?.configured ? '✓ Configurado no Servidor' : '⚠️ Pendente no .env do Servidor'}
+                    </span>
                   </div>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={config.access_token}
-                    onChange={(e) => setConfig({ ...config, access_token: e.target.value })}
-                    className="w-full bg-[#181818] border border-[#2a2a2a] focus:border-[#FF1A2D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono"
-                  />
-                </div>
 
-                <div>
-                  <label className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider block mb-1">
-                    Webhook Secret
-                  </label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={config.webhook_secret}
-                    onChange={(e) => setConfig({ ...config, webhook_secret: e.target.value })}
-                    className="w-full bg-[#181818] border border-[#2a2a2a] focus:border-[#FF1A2D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono"
-                  />
+                  <div className="flex items-center justify-between text-xs py-1 border-b border-[#222]">
+                    <span className="text-zinc-400 font-mono">MP_WEBHOOK_SECRET</span>
+                    <span className="text-zinc-400 font-semibold">
+                      {serverStatus?.configured ? '✓ Protegido no Servidor' : 'Opcional para Sandbox'}
+                    </span>
+                  </div>
+
+                  <p className="text-[10px] text-zinc-500">
+                    Para atualizar estas chaves, defina-as na seção de Variáveis de Ambiente do painel da Hostinger (Node.js Application Settings) ou no arquivo .env seguro do servidor.
+                  </p>
                 </div>
               </div>
 

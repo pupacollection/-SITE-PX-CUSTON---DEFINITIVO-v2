@@ -99,9 +99,15 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
             
             {/* Badges */}
             <div className="absolute top-4 left-4 flex items-center gap-2">
-              <span className="bg-[#FF1A2D] text-white text-xs font-black uppercase tracking-widest px-3 py-1 rounded-lg shadow-lg">
-                Evento Oficial
-              </span>
+              {event.is_demo ? (
+                <span className="bg-amber-600 text-white text-xs font-black uppercase tracking-widest px-3 py-1 rounded-lg shadow-lg">
+                  Homologação Técnica (DEMO)
+                </span>
+              ) : (
+                <span className="bg-[#FF1A2D] text-white text-xs font-black uppercase tracking-widest px-3 py-1 rounded-lg shadow-lg">
+                  Evento Oficial
+                </span>
+              )}
               <span className="bg-black/70 backdrop-blur-md border border-white/10 text-white text-xs px-3 py-1 rounded-lg">
                 PX CUSTON
               </span>
@@ -110,6 +116,18 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
 
           {/* Event Header Info */}
           <div className="p-6 sm:p-8 -mt-16 relative z-10">
+            {event.is_demo && (
+              <div className="mb-6 bg-amber-950/40 border border-amber-500/40 rounded-2xl p-4 flex items-center gap-3 text-amber-200 text-xs">
+                <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                <div>
+                  <span className="font-bold uppercase tracking-wider block">Evento de Demonstração & Homologação</span>
+                  <span className="text-zinc-300">
+                    Este evento possui caráter demonstrativo para validação técnica da plataforma. Pagamentos reais e vendas comerciais oficiais estão desabilitados.
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
               <div>
                 <h1 className="text-2xl sm:text-4xl font-black uppercase tracking-tight text-white font-heading">

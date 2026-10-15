@@ -28,7 +28,7 @@ export const INITIAL_EVENTS: EventItem[] = [
       'Estacionamento no local',
       'Apresentação de documento com foto na portaria',
     ],
-    is_official: true,
+    is_official: false,
     is_demo: true,
     status: 'published',
     ticket_batches: [
@@ -88,7 +88,7 @@ export const INITIAL_EVENTS: EventItem[] = [
       'Proibido som de terceiros fora da arena',
       'Segurança armada no local',
     ],
-    is_official: true,
+    is_official: false,
     is_demo: true,
     status: 'published',
     ticket_batches: [
@@ -138,7 +138,7 @@ export const INITIAL_EVENTS: EventItem[] = [
       'Veículos antigos com mais de 30 anos têm inscrição especial',
       'Praça gastronômica artesanal',
     ],
-    is_official: true,
+    is_official: false,
     is_demo: true,
     status: 'published',
     ticket_batches: [
@@ -184,7 +184,7 @@ export const INITIAL_TICKETS: Ticket[] = [
     user_id: 'usr-deivid-01',
     event_id: 'evt-mega-encontro-2025',
     batch_id: 'batch-pista-01',
-    event_title: 'MEGA ENCONTRO PX CUSTON',
+    event_title: 'MEGA ENCONTRO PX CUSTON [DEMO]',
     event_date: '15 NOV 2025 - Manhuaçu/MG',
     event_location: 'Parque de Exposições, Manhuaçu/MG',
     batch_name: 'Pista (Entrada Geral)',
@@ -202,7 +202,7 @@ export const INITIAL_TICKETS: Ticket[] = [
     user_id: 'usr-deivid-01',
     event_id: 'evt-racha-som-2025',
     batch_id: 'batch-som-geral',
-    event_title: 'RACHA DE SOM',
+    event_title: 'RACHA DE SOM [DEMO]',
     event_date: '06 DEZ 2025 - Manhuaçu/MG',
     event_location: 'Arena Automotiva, Manhuaçu/MG',
     batch_name: 'Pista Geral',
@@ -215,14 +215,17 @@ export const INITIAL_TICKETS: Ticket[] = [
   },
 ];
 
+// Configuração segura do Mercado Pago no frontend:
+// Tokens privados (access_token e webhook_secret) NUNCA são expostos no bundle do cliente
+// e residem exclusivamente no servidor/Hostinger/Secrets.
 export const INITIAL_MERCADO_PAGO_CONFIG: MercadoPagoConfig = {
-  environment: 'production',
-  public_key: 'APP_USR-78294a02-****-****-****-291849182390',
-  access_token: 'APP_USR-8291048102-****-****-****-019284019284',
-  webhook_secret: 'whsec_92019481028301928401928401928401',
+  environment: 'sandbox',
+  public_key: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_MP_PUBLIC_KEY) || '',
+  access_token: '', // Gerenciado exclusivamente no backend via MP_ACCESS_TOKEN
+  webhook_secret: '', // Gerenciado exclusivamente no backend via MP_WEBHOOK_SECRET
   pix_enabled: true,
   pix_instant_enabled: true,
   credit_card_enabled: true,
   boleto_enabled: false,
-  is_connected: true,
+  is_connected: false,
 };
