@@ -12,11 +12,13 @@ import {
   ShoppingBag,
 } from 'lucide-react';
 
+import { ProfileTab } from './ProfileView';
+
 interface MobileAppViewProps {
   events: EventItem[];
   user: UserProfile | null;
   onSelectEvent: (event: EventItem) => void;
-  onNavigate: (screen: ActiveScreen) => void;
+  onNavigate: (screen: ActiveScreen, initialTab?: ProfileTab) => void;
 }
 
 export const MobileAppView: React.FC<MobileAppViewProps> = ({
@@ -43,8 +45,9 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
             <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-[#FF1A2D] rounded-full"></span>
           </button>
           <button
-            onClick={() => onNavigate('checkout')}
-            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300"
+            onClick={() => onNavigate('profile', 'orders')}
+            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300 hover:text-white"
+            title="Meus Pedidos"
           >
             <ShoppingBag className="w-4 h-4" />
           </button>
@@ -144,7 +147,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
           </button>
 
           <button
-            onClick={() => onNavigate('home')}
+            onClick={() => onNavigate('profile', 'notifications')}
             className="bg-[#121212] hover:bg-[#181818] border border-[#222] p-3.5 rounded-xl flex flex-col items-center justify-center text-center transition group"
           >
             <div className="w-10 h-10 rounded-full bg-[#1c1c1c] group-hover:bg-[#FF1A2D] text-zinc-300 group-hover:text-white flex items-center justify-center mb-2 transition">

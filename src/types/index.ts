@@ -136,6 +136,16 @@ export interface CheckinStat {
   }[];
 }
 
+export interface AppNotification {
+  id: string;
+  user_id?: string;
+  title: string;
+  message: string;
+  type: 'ticket' | 'payment' | 'event' | 'system';
+  read: boolean;
+  created_at: string;
+}
+
 export type ActiveScreen =
   | 'home'
   | 'mobile_app'

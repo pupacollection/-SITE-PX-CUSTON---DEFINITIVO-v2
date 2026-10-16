@@ -26,7 +26,7 @@ import { MobileAppView } from './views/MobileAppView';
 import { EventsCatalogView } from './views/EventsCatalogView';
 import { EventDetailView } from './views/EventDetailView';
 import { AuthView } from './views/AuthView';
-import { ProfileView } from './views/ProfileView';
+import { ProfileView, ProfileTab } from './views/ProfileView';
 import { CheckoutView } from './views/CheckoutView';
 import { DigitalTicketView } from './views/DigitalTicketView';
 import { CheckinView } from './views/CheckinView';
@@ -36,6 +36,7 @@ import { CacheMaintenanceView } from './views/CacheMaintenanceView';
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ActiveScreen>('home');
+  const [profileInitialTab, setProfileInitialTab] = useState<ProfileTab>('profile');
   const [user, setUser] = useState<UserProfile | null>(null);
   const [events, setEvents] = useState<EventItem[]>(INITIAL_EVENTS);
   const [selectedEvent, setSelectedEvent] = useState<EventItem>(INITIAL_EVENTS[0]);
@@ -92,7 +93,10 @@ export default function App() {
   }, []);
 
   // Navigation handlers
-  const handleNavigate = (screen: ActiveScreen) => {
+  const handleNavigate = (screen: ActiveScreen, initialTab?: ProfileTab) => {
+    if (initialTab) {
+      setProfileInitialTab(initialTab);
+    }
     setCurrentScreen(screen);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -207,18 +211,45 @@ export default function App() {
           />
         )}
 
-        {currentScreen === 'profile' && user && (
-          <ProfileView
-            user={user}
-            tickets={tickets}
-            onUpdateProfile={handleUpdateProfile}
-            onSelectTicket={(tkt) => {
-              setSelectedTicket(tkt);
-              handleNavigate('digital_ticket');
-            }}
-            onNavigate={handleNavigate}
-            onLogout={handleLogout}
-          />
+        {currentScreen === 'profile' && (
+          !user ? (
+            <div className="min-h-[70vh] flex flex-col items-center justify-center p-6 text-center">
+              <div className="w-16 h-16 rounded-2xl bg-[#141414] border border-[#2a2a2a] flex items-center justify-center mb-4 text-[#FF1A2D] shadow-[0_0_20px_rgba(255,26,45,0.2)]">
+                <span className="text-xl font-black font-heading">PX</span>
+              </div>
+              <h2 className="text-xl font-bold font-heading mb-2">Acesse sua Conta PX CUSTON</h2>
+              <p className="text-zinc-400 text-sm max-w-md mb-6 leading-relaxed">
+                Faça login para gerenciar seus ingressos digitais, acompanhar pedidos, cadastrar seus veículos e visualizar suas notificações.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setAuthModalOpen(true)}
+                  className="px-5 py-2.5 bg-[#FF1A2D] text-white font-bold text-xs uppercase tracking-wider rounded-xl hover:bg-[#e01426] transition shadow-[0_0_15px_rgba(255,26,45,0.4)]"
+                >
+                  Fazer Login / Cadastro
+                </button>
+                <button
+                  onClick={() => handleNavigate('home')}
+                  className="px-5 py-2.5 bg-[#181818] border border-[#2a2a2a] text-zinc-300 font-semibold text-xs rounded-xl hover:text-white hover:bg-[#222222] transition"
+                >
+                  Voltar ao Início
+                </button>
+              </div>
+            </div>
+          ) : (
+            <ProfileView
+              user={user}
+              tickets={tickets}
+              initialTab={profileInitialTab}
+              onUpdateProfile={handleUpdateProfile}
+              onSelectTicket={(tkt) => {
+                setSelectedTicket(tkt);
+                handleNavigate('digital_ticket');
+              }}
+              onNavigate={handleNavigate}
+              onLogout={handleLogout}
+            />
+          )
         )}
 
         {currentScreen === 'checkout' && (
