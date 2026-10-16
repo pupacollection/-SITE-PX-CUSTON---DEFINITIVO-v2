@@ -13,18 +13,21 @@ import {
   ShieldCheck,
   ChevronLeft,
   ChevronRight,
+  ArrowLeft,
 } from 'lucide-react';
 
 interface DigitalTicketViewProps {
   tickets: Ticket[];
   selectedTicket?: Ticket | null;
   onNavigate: (screen: ActiveScreen) => void;
+  onBack?: () => void;
 }
 
 export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
   tickets,
   selectedTicket: initialTicket,
   onNavigate,
+  onBack,
 }) => {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -93,6 +96,19 @@ export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
 
   return (
     <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 flex flex-col items-center justify-center">
+      {/* Top Navigation */}
+      <div className="w-full max-w-sm mb-4 flex items-center justify-between">
+        <button
+          onClick={onBack || (() => onNavigate('profile'))}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 hover:text-white bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] px-3 py-1.5 rounded-xl transition"
+          aria-label="Voltar"
+        >
+          <ArrowLeft className="w-3.5 h-3.5 text-[#FF1A2D]" />
+          <span>Voltar</span>
+        </button>
+        <span className="text-[11px] font-mono text-zinc-500 uppercase tracking-wider">Ingresso Oficial</span>
+      </div>
+
       {/* Switcher if multiple tickets exist */}
       {tickets.length > 1 && (
         <div className="flex items-center gap-4 mb-4 text-xs text-zinc-400">

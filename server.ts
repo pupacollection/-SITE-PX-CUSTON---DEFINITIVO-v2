@@ -1,10 +1,13 @@
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
+import { validateAndDecodePng } from './src/lib/pngValidator';
 
 dotenv.config();
 
@@ -15,7 +18,8 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const isProd = process.env.NODE_ENV === 'production';
 
-app.use(express.json());
+// Aceitar payloads com imagens codificadas em Base64 (ícones PWA multi-resolução)
+app.use(express.json({ limit: '10mb' }));
 
 // Supabase Configuration (Strictly from environment variables - NO hardcoded secrets)
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://jivviwvpjxzhbpbmqmxm.supabase.co';
@@ -94,6 +98,289 @@ const requireRole = (allowedRoles: string[]) => {
     next();
   };
 };
+
+// ==========================================
+// PWA BRANDING & STATIC ASSETS
+// ==========================================
+
+// Servir ícones personalizados persistidos na pasta public/branding
+app.use('/branding', express.static(path.resolve(__dirname, 'public', 'branding')));
+
+const BRANDING_FILE_PATH = path.resolve(__dirname, 'data', 'pwa-branding.json');
+
+const getStoredBranding = () => {
+  try {
+    if (fs.existsSync(BRANDING_FILE_PATH)) {
+      const raw = fs.readFileSync(BRANDING_FILE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        typeof parsed.is_custom === 'boolean' &&
+        typeof parsed.icon_192 === 'string' &&
+        typeof parsed.icon_512 === 'string' &&
+        typeof parsed.icon_maskable === 'string'
+      ) {
+        // Se estiver marcado como customizado, confirmar que TODOS os 3 arquivos físicos existem no disco
+        if (parsed.is_custom) {
+          const file192 = path.resolve(__dirname, 'public', parsed.icon_192.replace(/^\//, ''));
+          const file512 = path.resolve(__dirname, 'public', parsed.icon_512.replace(/^\//, ''));
+          const fileMaskable = path.resolve(__dirname, 'public', parsed.icon_maskable.replace(/^\//, ''));
+          if (fs.existsSync(file192) && fs.existsSync(file512) && fs.existsSync(fileMaskable)) {
+            return parsed;
+          } else {
+            console.warn('[Branding] Um ou mais arquivos de ícone customizado ausentes no disco. Revertendo para padrão oficial.');
+          }
+        } else {
+          return parsed;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Branding] Falha ao ler ou analisar arquivo de branding:', err);
+  }
+  return {
+    is_custom: false,
+    icon_192: '/px-logo-192.png',
+    icon_512: '/px-logo-512.png',
+    icon_maskable: '/px-logo-maskable-512.png',
+  };
+};
+
+// Manifesto Dinâmico PWA: Entrega os ícones atualizados sem necessidade de rebuild do Vite
+app.get(['/manifest.webmanifest', '/manifest.json'], (req: Request, res: Response) => {
+  const branding = getStoredBranding();
+  const cacheBuster = branding.updated_at ? `?v=${new Date(branding.updated_at).getTime()}` : '';
+
+  const manifest = {
+    id: '/',
+    name: 'PX CUSTON — Eventos, Carros & Experiências',
+    short_name: 'PX CUSTON',
+    description: 'Plataforma oficial da PX CUSTON para eventos automotivos, ingressos digitais com QR Code e check-in.',
+    theme_color: '#FF1A2D',
+    background_color: '#000000',
+    display: 'standalone',
+    orientation: 'portrait',
+    start_url: '/',
+    scope: '/',
+    icons: [
+      {
+        src: `${branding.icon_192}${cacheBuster}`,
+        sizes: '192x192',
+        type: 'image/png',
+        purpose: 'any',
+      },
+      {
+        src: `${branding.icon_512}${cacheBuster}`,
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'any',
+      },
+      {
+        src: `${branding.icon_maskable}${cacheBuster}`,
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'maskable',
+      },
+    ],
+  };
+
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.json(manifest);
+});
+
+// Endpoint público: Consulta estado atual dos ícones do PWA
+app.get('/api/branding', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.json(getStoredBranding());
+});
+
+// Endpoint administrativo: Salva novos ícones PWA multi-resolução gerados pelo PX CONTROL
+app.post(
+  '/api/admin/pwa-icon',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    const tmpFilesToClean: string[] = [];
+    try {
+      const { icon_192, icon_512, icon_maskable } = req.body;
+      if (!icon_192 || !icon_512 || !icon_maskable) {
+        return res.status(400).json({ error: 'Todos os formatos (192, 512 e maskable) são obrigatórios.' });
+      }
+
+      // 1. Validação estrita e decodificação completa dos 3 ícones antes de tocar em qualquer arquivo no disco
+      const v192 = validateAndDecodePng(icon_192, 192, 192);
+      if (!v192.valid) {
+        return res.status(400).json({ error: `Ícone 192x192 inválido: ${v192.error}` });
+      }
+
+      const v512 = validateAndDecodePng(icon_512, 512, 512);
+      if (!v512.valid) {
+        return res.status(400).json({ error: `Ícone 512x512 inválido: ${v512.error}` });
+      }
+
+      const vMaskable = validateAndDecodePng(icon_maskable, 512, 512);
+      if (!vMaskable.valid) {
+        return res.status(400).json({ error: `Ícone Maskable inválido: ${vMaskable.error}` });
+      }
+
+      // 2. Garantir existência de diretórios protegidos
+      const brandingDir = path.resolve(__dirname, 'public', 'branding');
+      if (!fs.existsSync(brandingDir)) {
+        fs.mkdirSync(brandingDir, { recursive: true });
+      }
+
+      const dataDir = path.resolve(__dirname, 'data');
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+
+      const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const tmp192 = path.join(brandingDir, `pwa-192.tmp.${uniqueSuffix}`);
+      const tmp512 = path.join(brandingDir, `pwa-512.tmp.${uniqueSuffix}`);
+      const tmpMaskable = path.join(brandingDir, `pwa-maskable-512.tmp.${uniqueSuffix}`);
+      const tmpJson = `${BRANDING_FILE_PATH}.tmp.${uniqueSuffix}`;
+
+      tmpFilesToClean.push(tmp192, tmp512, tmpMaskable, tmpJson);
+
+      const target192 = path.join(brandingDir, 'pwa-192.png');
+      const target512 = path.join(brandingDir, 'pwa-512.png');
+      const targetMaskable = path.join(brandingDir, 'pwa-maskable-512.png');
+
+      const bak192 = path.join(brandingDir, `pwa-192.bak.${uniqueSuffix}`);
+      const bak512 = path.join(brandingDir, `pwa-512.bak.${uniqueSuffix}`);
+      const bakMaskable = path.join(brandingDir, `pwa-maskable-512.bak.${uniqueSuffix}`);
+
+      // 3. Gravar arquivos em temporários primeiro
+      fs.writeFileSync(tmp192, v192.buffer);
+      fs.writeFileSync(tmp512, v512.buffer);
+      fs.writeFileSync(tmpMaskable, vMaskable.buffer);
+
+      // 4. Criar backup dos arquivos atuais para rollback seguro se houver falha subsequente
+      if (fs.existsSync(target192)) fs.copyFileSync(target192, bak192);
+      if (fs.existsSync(target512)) fs.copyFileSync(target512, bak512);
+      if (fs.existsSync(targetMaskable)) fs.copyFileSync(targetMaskable, bakMaskable);
+
+      // 5. Renomear atomicamente os temporários para os arquivos ativos
+      fs.renameSync(tmp192, target192);
+      fs.renameSync(tmp512, target512);
+      fs.renameSync(tmpMaskable, targetMaskable);
+
+      // Se houver diretório dist compilado (produção Hostinger), sincronizar também
+      const distBrandingDir = path.resolve(__dirname, 'dist', 'branding');
+      if (fs.existsSync(path.resolve(__dirname, 'dist'))) {
+        if (!fs.existsSync(distBrandingDir)) {
+          fs.mkdirSync(distBrandingDir, { recursive: true });
+        }
+        fs.copyFileSync(target192, path.join(distBrandingDir, 'pwa-192.png'));
+        fs.copyFileSync(target512, path.join(distBrandingDir, 'pwa-512.png'));
+        fs.copyFileSync(targetMaskable, path.join(distBrandingDir, 'pwa-maskable-512.png'));
+      }
+
+      const timestamp = new Date().toISOString();
+      const newBranding = {
+        is_custom: true,
+        icon_192: '/branding/pwa-192.png',
+        icon_512: '/branding/pwa-512.png',
+        icon_maskable: '/branding/pwa-maskable-512.png',
+        updated_at: timestamp,
+        updated_by: req.user?.email || 'admin',
+      };
+
+      // 6. Gravação atômica do JSON com rollback caso ocorra erro
+      try {
+        fs.writeFileSync(tmpJson, JSON.stringify(newBranding, null, 2));
+        fs.renameSync(tmpJson, BRANDING_FILE_PATH);
+      } catch (jsonErr) {
+        // Rollback: restaurar ícones anteriores se o JSON falhar na gravação
+        console.error('[Branding] Falha ao gravar JSON de configuração. Executando rollback...', jsonErr);
+        if (fs.existsSync(bak192)) fs.renameSync(bak192, target192);
+        if (fs.existsSync(bak512)) fs.renameSync(bak512, target512);
+        if (fs.existsSync(bakMaskable)) fs.renameSync(bakMaskable, targetMaskable);
+        throw jsonErr;
+      }
+
+      // Sucesso: remover backups temporários
+      try {
+        if (fs.existsSync(bak192)) fs.unlinkSync(bak192);
+        if (fs.existsSync(bak512)) fs.unlinkSync(bak512);
+        if (fs.existsSync(bakMaskable)) fs.unlinkSync(bakMaskable);
+      } catch {}
+
+      // Auditoria no banco (se tabela audit_logs estiver disponível)
+      try {
+        await supabaseAdmin.from('audit_logs').insert({
+          actor_id: req.user.id,
+          action: 'UPDATE_PWA_BRANDING_ICONS',
+          resource_type: 'site_settings',
+          resource_id: 'pwa_branding',
+          payload: { updated_by: req.user.email, timestamp },
+        });
+      } catch {
+        // Tolerante
+      }
+
+      return res.json({ success: true, branding: newBranding });
+    } catch (err: any) {
+      console.error('[Branding] Erro ao salvar ícones PWA:', err);
+      return res.status(500).json({ error: 'Falha interna ao gravar os novos ícones do aplicativo.' });
+    } finally {
+      // Limpeza garantida de temporários residuais
+      for (const f of tmpFilesToClean) {
+        try {
+          if (fs.existsSync(f)) fs.unlinkSync(f);
+        } catch {}
+      }
+    }
+  }
+);
+
+// Endpoint administrativo: Restaura os ícones para o padrão oficial da PX CUSTON
+app.post(
+  '/api/admin/pwa-icon/reset',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const timestamp = new Date().toISOString();
+      const defaultBranding = {
+        is_custom: false,
+        icon_192: '/px-logo-192.png',
+        icon_512: '/px-logo-512.png',
+        icon_maskable: '/px-logo-maskable-512.png',
+        updated_at: timestamp,
+        updated_by: req.user?.email || 'admin',
+      };
+
+      const dataDir = path.resolve(__dirname, 'data');
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+
+      const tmpJson = `${BRANDING_FILE_PATH}.tmp`;
+      fs.writeFileSync(tmpJson, JSON.stringify(defaultBranding, null, 2));
+      fs.renameSync(tmpJson, BRANDING_FILE_PATH);
+
+      try {
+        await supabaseAdmin.from('audit_logs').insert({
+          actor_id: req.user.id,
+          action: 'RESET_PWA_BRANDING_ICONS',
+          resource_type: 'site_settings',
+          resource_id: 'pwa_branding',
+          payload: { updated_by: req.user.email, timestamp },
+        });
+      } catch {
+        // Tolerante
+      }
+
+      return res.json({ success: true, branding: defaultBranding });
+    } catch (err: any) {
+      console.error('[Branding] Erro ao restaurar ícone:', err);
+      return res.status(500).json({ error: 'Falha interna ao restaurar ícone padrão.' });
+    }
+  }
+);
 
 // ==========================================
 // API ROUTES

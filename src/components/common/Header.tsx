@@ -35,6 +35,18 @@ export const Header: React.FC<HeaderProps> = ({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [screensDropdownOpen, setScreensDropdownOpen] = useState(false);
   const { isInstallable, install } = usePWAInstall();
+  const isDev = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
+
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMobileMenuOpen(false);
+        setScreensDropdownOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleNav = (screen: ActiveScreen) => {
     onNavigate(screen);
@@ -96,15 +108,18 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Quick Mockup Screen Explorer Dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setScreensDropdownOpen(!screensDropdownOpen)}
-              className="flex items-center gap-1.5 text-xs bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] text-zinc-300 px-3 py-1.5 rounded-lg transition"
-            >
-              <span>Navegar Telas (Fase 1)</span>
-              <ChevronDown className="w-3.5 h-3.5 text-[#FF1A2D]" />
-            </button>
+          {/* Menu de Homologação / Dev Screen Explorer (Exibido exclusivamente em ambiente de desenvolvimento) */}
+          {isDev && (
+            <div className="relative">
+              <button
+                onClick={() => setScreensDropdownOpen(!screensDropdownOpen)}
+                aria-expanded={screensDropdownOpen}
+                aria-label="Menu de telas em desenvolvimento"
+                className="flex items-center gap-1.5 text-xs bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] text-zinc-300 px-3 py-1.5 rounded-lg transition"
+              >
+                <span className="font-mono text-[11px] text-amber-400">[DEV] Telas</span>
+                <ChevronDown className="w-3.5 h-3.5 text-[#FF1A2D]" />
+              </button>
 
             {screensDropdownOpen && (
               <div className="absolute right-0 mt-2 w-72 bg-[#121212] border border-[#262626] rounded-xl shadow-2xl py-2 z-50 text-xs text-zinc-300 animate-fade-in divide-y divide-[#1e1e1e]">
@@ -210,7 +225,8 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             )}
           </div>
-        </nav>
+        )}
+      </nav>
 
         {/* Right Action Icons & Profile / Login */}
         <div className="flex items-center gap-3">
@@ -282,6 +298,8 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Mobile Hamburger Menu Toggle */}
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-expanded={mobileMenuOpen}
+            aria-label={mobileMenuOpen ? 'Fechar menu de navegação' : 'Abrir menu de navegação'}
             className="md:hidden p-2 text-zinc-400 hover:text-white hover:bg-[#161616] rounded-lg transition"
           >
             {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
@@ -313,74 +331,82 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-2 text-xs">
+          {/* Navegação Oficial Mobile */}
+          <nav className="space-y-1 text-xs" aria-label="Navegação mobile">
             <button
               onClick={() => handleNav('home')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                currentScreen === 'home'
+                  ? 'bg-[#181818] text-[#FF1A2D] font-bold border border-[#2a2a2a]'
+                  : 'text-zinc-300 hover:text-white hover:bg-[#141414]'
+              }`}
             >
-              <span>01. Home</span>
+              <span>Início</span>
             </button>
+
             <button
-              onClick={() => handleNav('mobile_app')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
+              onClick={() => handleNav('events')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                currentScreen === 'events' || currentScreen === 'event_detail'
+                  ? 'bg-[#181818] text-[#FF1A2D] font-bold border border-[#2a2a2a]'
+                  : 'text-zinc-300 hover:text-white hover:bg-[#141414]'
+              }`}
             >
-              <span>02. App Mobile</span>
+              <span>Eventos & Encontros</span>
             </button>
-            <button
-              onClick={() => handleNav('auth')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-            >
-              <span>03. Login/Cadastro</span>
-            </button>
-            <button
-              onClick={() => handleNav('profile')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-            >
-              <span>04. Perfil</span>
-            </button>
-            <button
-              onClick={() => handleNav('event_detail')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-            >
-              <span>05. Detalhe Evento</span>
-            </button>
-            <button
-              onClick={() => handleNav('checkout')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-            >
-              <span>06. Checkout MP</span>
-            </button>
+
             <button
               onClick={() => handleNav('digital_ticket')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                currentScreen === 'digital_ticket'
+                  ? 'bg-[#181818] text-[#FF1A2D] font-bold border border-[#2a2a2a]'
+                  : 'text-zinc-300 hover:text-white hover:bg-[#141414]'
+              }`}
             >
-              <span>07. Ingresso QR</span>
+              <span>Meus Ingressos</span>
             </button>
+
+            <button
+              onClick={() => handleNav('mobile_app')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                currentScreen === 'mobile_app'
+                  ? 'bg-[#181818] text-[#FF1A2D] font-bold border border-[#2a2a2a]'
+                  : 'text-zinc-300 hover:text-white hover:bg-[#141414]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                <span>Instalar Aplicativo PWA</span>
+              </div>
+            </button>
+
+            <button
+              onClick={() => handleNav('profile')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                currentScreen === 'profile'
+                  ? 'bg-[#181818] text-[#FF1A2D] font-bold border border-[#2a2a2a]'
+                  : 'text-zinc-300 hover:text-white hover:bg-[#141414]'
+              }`}
+            >
+              <span>{user ? 'Meu Perfil' : 'Acessar Conta'}</span>
+            </button>
+
             {user && ['CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
               <button
                 onClick={() => handleNav('checkin')}
-                className="text-left p-2.5 rounded-lg bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 text-[#FF1A2D] font-bold flex items-center gap-2"
+                className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                  currentScreen === 'checkin'
+                    ? 'bg-[#FF1A2D]/20 text-[#FF1A2D] font-bold border border-[#FF1A2D]/40'
+                    : 'text-[#FF1A2D] bg-[#160c0d] border border-[#FF1A2D]/20 hover:bg-[#FF1A2D]/10'
+                }`}
               >
-                <span>08. PX Check-in</span>
+                <div className="flex items-center gap-2">
+                  <QrCode className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                  <span>PX Check-in (Portaria)</span>
+                </div>
               </button>
             )}
-            {user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
-              <>
-                <button
-                  onClick={() => handleNav('admin_dashboard')}
-                  className="text-left p-2.5 rounded-lg bg-[#181818] border border-[#333] text-white font-bold flex items-center gap-2"
-                >
-                  <span>09. PX CONTROL</span>
-                </button>
-                <button
-                  onClick={() => handleNav('admin_payments')}
-                  className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-                >
-                  <span>10. Config Pagamento</span>
-                </button>
-              </>
-            )}
-          </div>
+          </nav>
 
           <div className="pt-2 border-t border-[#1f1f1f] flex items-center justify-between">
             {user ? (

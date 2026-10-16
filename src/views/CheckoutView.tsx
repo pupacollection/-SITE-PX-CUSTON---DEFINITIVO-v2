@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Lock,
   ArrowRight,
+  ArrowLeft,
   Sparkles,
   AlertCircle,
 } from 'lucide-react';
@@ -103,7 +104,22 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
   return (
     <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-4xl mx-auto space-y-8">
+      <div className="max-w-4xl mx-auto space-y-6">
+        {/* Top bar with Back Button & Breadcrumb */}
+        <div className="flex items-center justify-between pb-1">
+          <button
+            onClick={onCancel}
+            className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-white bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] px-3.5 py-2 rounded-xl transition"
+            aria-label="Voltar para a página do evento"
+          >
+            <ArrowLeft className="w-4 h-4 text-[#FF1A2D]" />
+            <span>Voltar ao Evento</span>
+          </button>
+          <span className="text-xs font-mono text-zinc-500 uppercase tracking-wider hidden sm:block">
+            Checkout Seguro
+          </span>
+        </div>
+
         {/* Stepper (1 Ingressos -> 2 Pagamento -> 3 Confirmação) */}
         <div className="flex items-center justify-center gap-4 sm:gap-8 border-b border-[#222] pb-6">
           <div className="flex items-center gap-2">

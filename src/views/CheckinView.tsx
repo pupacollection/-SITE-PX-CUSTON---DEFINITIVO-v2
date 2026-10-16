@@ -17,9 +17,10 @@ import {
 interface CheckinViewProps {
   tickets: Ticket[];
   onNavigate: (screen: ActiveScreen) => void;
+  onBack?: () => void;
 }
 
-export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate }) => {
+export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate, onBack }) => {
   const [manualCode, setManualCode] = useState('');
   const [cameraActive, setCameraActive] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -140,8 +141,9 @@ export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate })
         <div className="flex items-center justify-between border-b border-[#1c1c1c] pb-4">
           <div className="flex items-center gap-2">
             <button
-              onClick={() => onNavigate('home')}
-              className="p-1.5 rounded-lg bg-[#141414] border border-[#262626] text-zinc-400 hover:text-white"
+              onClick={onBack || (() => onNavigate('home'))}
+              className="p-1.5 rounded-lg bg-[#141414] border border-[#262626] text-zinc-400 hover:text-white transition"
+              aria-label="Voltar"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>

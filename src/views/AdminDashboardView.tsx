@@ -20,8 +20,10 @@ import {
   CreditCard,
   AlertCircle,
   Eye,
+  Palette,
 } from 'lucide-react';
 import { AdminEventsManager } from '../components/admin/AdminEventsManager';
+import { AdminBrandingManager } from '../components/admin/AdminBrandingManager';
 
 interface AdminDashboardViewProps {
   events: EventItem[];
@@ -47,7 +49,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onNavigate,
   onRefreshEvents,
 }) => {
-  const [adminTab, setAdminTab] = useState<'dashboard' | 'events' | 'tickets' | 'orders' | 'users'>('dashboard');
+  const [adminTab, setAdminTab] = useState<'dashboard' | 'events' | 'tickets' | 'orders' | 'users' | 'branding'>('dashboard');
   const [dateRange, setDateRange] = useState('01/11/2025 - 30/11/2025');
   const [ordersSearch, setOrdersSearch] = useState('');
   const [ordersFilter, setOrdersFilter] = useState<'all' | 'approved' | 'pending'>('all');
@@ -197,11 +199,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               <span>Ingressos</span>
             </button>
 
-            {/* Menu Pedidos: Alterna para aba de Gestão de Pedidos */}
+            {/* Menu Pedidos: Alterna para aba de Gestão de Pedidos (Todos) */}
             <button
-              onClick={() => setAdminTab('orders')}
+              onClick={() => {
+                setAdminTab('orders');
+                setOrdersFilter('all');
+              }}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
-                adminTab === 'orders'
+                adminTab === 'orders' && ordersFilter === 'all'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
@@ -227,14 +232,41 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               <span>Usuários</span>
             </button>
 
+            {/* Menu Identidade Visual & PWA */}
             <button
-              onClick={() => onNavigate('admin_payments')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              onClick={() => setAdminTab('branding')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+                adminTab === 'branding'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
             >
-              <DollarSign className="w-4 h-4" />
-              <span>Financeiro</span>
+              <Palette className="w-4 h-4" />
+              <span>Ícone & PWA</span>
             </button>
 
+            {/* Menu Financeiro: Alterna para Pedidos Faturados / Receita Aprovada */}
+            <button
+              onClick={() => {
+                setAdminTab('orders');
+                setOrdersFilter('approved');
+              }}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+                adminTab === 'orders' && ordersFilter === 'approved'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <DollarSign className="w-4 h-4" />
+                <span>Financeiro</span>
+              </div>
+              <span className="text-[10px] text-emerald-400 font-mono font-bold">
+                R$ {totalApprovedRevenue.toFixed(0)}
+              </span>
+            </button>
+
+            {/* Menu Configurações: Gateway Mercado Pago & Sistema */}
             <button
               onClick={() => onNavigate('admin_payments')}
               className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
@@ -881,6 +913,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </div>
           </div>
         )}
+
+        {/* SEÇÃO 6: IDENTIDADE VISUAL & ÍCONE PWA */}
+        {adminTab === 'branding' && <AdminBrandingManager />}
       </main>
     </div>
   );

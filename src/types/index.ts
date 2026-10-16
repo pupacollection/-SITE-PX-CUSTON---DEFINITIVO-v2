@@ -159,3 +159,12 @@ export type ActiveScreen =
   | 'admin_dashboard'
   | 'admin_payments'
   | 'admin_cache';
+
+export interface PwaBrandingConfig {
+  is_custom: boolean;
+  icon_192: string;
+  icon_512: string;
+  icon_maskable: string;
+  updated_at?: string;
+  updated_by?: string;
+}

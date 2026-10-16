@@ -17,7 +17,9 @@ import {
   Wrench,
   Database,
   Lock,
+  Palette,
 } from 'lucide-react';
+import { AdminBrandingManager } from '../components/admin/AdminBrandingManager';
 
 interface PaymentSettingsViewProps {
   initialConfig: MercadoPagoConfig;
@@ -30,7 +32,7 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
   onSave,
   onNavigate,
 }) => {
-  const [settingsTab, setSettingsTab] = useState<'payments' | 'notifications'>('payments');
+  const [settingsTab, setSettingsTab] = useState<'payments' | 'notifications' | 'branding'>('payments');
   const [config, setConfig] = useState<MercadoPagoConfig>(initialConfig);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [savingNotice, setSavingNotice] = useState(false);
@@ -160,6 +162,18 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
             >
               <Bell className="w-4 h-4" />
               <span>Notificações (Preferências Locais)</span>
+            </button>
+
+            <button
+              onClick={() => setSettingsTab('branding')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+                settingsTab === 'branding'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
+            >
+              <Palette className="w-4 h-4" />
+              <span>Identidade & Ícone PWA</span>
             </button>
 
             <button
@@ -502,6 +516,9 @@ export const PaymentSettingsView: React.FC<PaymentSettingsViewProps> = ({
                 </div>
               </div>
             )}
+
+            {/* ABA 3: IDENTIDADE VISUAL E ÍCONE DO PWA */}
+            {settingsTab === 'branding' && <AdminBrandingManager />}
           </div>
         </div>
       </div>

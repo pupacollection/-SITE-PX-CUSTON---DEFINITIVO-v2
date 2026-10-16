@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   ActiveScreen,
   EventItem,
@@ -19,6 +19,7 @@ import { BottomNav } from './components/common/BottomNav';
 import { PWAInstallPrompt } from './components/common/PWAInstallPrompt';
 import { OfflineBanner } from './components/common/OfflineBanner';
 import { supabase, getCurrentUserProfile, signOutUser } from './lib/supabase';
+import { getPwaBranding, applyDynamicPwaIcons } from './services/brandingService';
 
 // Views
 import { HomeView } from './views/HomeView';
@@ -64,6 +65,17 @@ export default function App() {
     }
   }, []);
 
+  // Sincronização e aplicação dinâmica dos ícones do PWA
+  React.useEffect(() => {
+    getPwaBranding()
+      .then((branding) => {
+        applyDynamicPwaIcons(branding);
+      })
+      .catch((err) => {
+        console.warn('[Branding] Falha ao sincronizar ícones do PWA:', err);
+      });
+  }, []);
+
   // Sincronização em tempo real com Supabase Auth
   React.useEffect(() => {
     // 1. Obter sessão atual do Supabase
@@ -98,22 +110,125 @@ export default function App() {
     };
   }, [fetchEventsFromDatabase]);
 
-  // Navigation handlers
-  const handleNavigate = (screen: ActiveScreen, initialTab?: ProfileTab) => {
-    if (initialTab) {
-      setProfileInitialTab(initialTab);
+  // Histórico de navegação e telas administrativas
+  const [historyStack, setHistoryStack] = useState<ActiveScreen[]>([]);
+  const ADMIN_SCREENS: ActiveScreen[] = ['admin_dashboard', 'admin_payments', 'admin_cache'];
+
+  // Destino seguro e contextual para retorno caso o histórico esteja vazio
+  const getContextualFallback = useCallback((fromScreen: ActiveScreen): ActiveScreen => {
+    if (['admin_payments', 'admin_cache'].includes(fromScreen)) {
+      return 'admin_dashboard';
     }
-    setCurrentScreen(screen);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+    if (fromScreen === 'admin_dashboard') {
+      return 'home';
+    }
+    if (fromScreen === 'checkout') {
+      return 'event_detail';
+    }
+    if (fromScreen === 'event_detail') {
+      return 'events';
+    }
+    if (fromScreen === 'digital_ticket') {
+      return 'profile';
+    }
+    if (fromScreen === 'checkin') {
+      return user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) ? 'admin_dashboard' : 'home';
+    }
+    return 'home';
+  }, [user]);
+
+  // Função centralizada para navegação com registro no histórico
+  const handleNavigate = useCallback(
+    (screen: ActiveScreen, initialTab?: ProfileTab, replace = false) => {
+      if (initialTab) {
+        setProfileInitialTab(initialTab);
+      }
+      setCurrentScreen((current) => {
+        if (current === screen) return current;
+
+        if (!replace) {
+          setHistoryStack((prev) => {
+            // Previne repetições consecutivas idênticas
+            if (prev.length > 0 && prev[prev.length - 1] === current) {
+              return prev;
+            }
+            const updated = [...prev, current];
+            return updated.slice(-15);
+          });
+
+          try {
+            window.history.pushState({ screen }, '', window.location.pathname);
+          } catch {
+            // ignore
+          }
+        }
+
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return screen;
+      });
+    },
+    []
+  );
+
+  // Função centralizada para voltar à tela anterior com segurança
+  const handleGoBack = useCallback(() => {
+    setHistoryStack((prev) => {
+      if (prev.length > 0) {
+        const newStack = [...prev];
+        const previousScreen = newStack.pop()!;
+        setCurrentScreen(previousScreen);
+        try {
+          window.history.replaceState({ screen: previousScreen }, '', window.location.pathname);
+        } catch {
+          // ignore
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return newStack;
+      } else {
+        const fallback = getContextualFallback(currentScreen);
+        setCurrentScreen(fallback);
+        try {
+          window.history.replaceState({ screen: fallback }, '', window.location.pathname);
+        } catch {
+          // ignore
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return [];
+      }
+    });
+  }, [currentScreen, getContextualFallback]);
+
+  // Sincronização com o histórico nativo do navegador e botão Voltar do dispositivo
+  useEffect(() => {
+    try {
+      if (!window.history.state?.screen) {
+        window.history.replaceState({ screen: 'home' }, '', window.location.pathname);
+      }
+    } catch {
+      // ignore
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      if (event.state && event.state.screen) {
+        const targetScreen = event.state.screen as ActiveScreen;
+        setCurrentScreen(targetScreen);
+        setHistoryStack((prev) => (prev.length > 0 ? prev.slice(0, -1) : []));
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        handleGoBack();
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [handleGoBack]);
 
   const handleSelectEvent = (event: EventItem) => {
     setSelectedEvent(event);
     setSelectedBatches([
       { batch: event.ticket_batches[0], quantity: 2 },
     ]);
-    setCurrentScreen('event_detail');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    handleNavigate('event_detail');
   };
 
   const handleProceedToCheckout = (
@@ -122,15 +237,13 @@ export default function App() {
   ) => {
     setSelectedEvent(event);
     setSelectedBatches(batches);
-    setCurrentScreen('checkout');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    handleNavigate('checkout');
   };
 
   const handleCheckoutSuccess = (newTickets: Ticket[]) => {
     setTickets((prev) => [...newTickets, ...prev]);
     setSelectedTicket(newTickets[0]);
-    setCurrentScreen('digital_ticket');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    handleNavigate('digital_ticket');
   };
 
   const handleUpdateProfile = (updated: Partial<UserProfile>) => {
@@ -146,11 +259,13 @@ export default function App() {
       console.warn('Erro ao deslogar do Supabase:', e);
     }
     setUser(null);
-    setCurrentScreen('home');
+    handleNavigate('home');
   };
 
-  // Check if current screen is admin or standalone to conditionally adapt footer/header
-  const isDedicatedAdmin = currentScreen === 'admin_dashboard';
+  // Verifica se a tela atual é administrativa com usuário autorizado (possui barra lateral ou cabeçalho próprio)
+  const isDedicatedAdmin =
+    ADMIN_SCREENS.includes(currentScreen) &&
+    Boolean(user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role));
 
   return (
     <div className="min-h-screen bg-[#000000] text-white flex flex-col font-sans selection:bg-[#FF1A2D] selection:text-white">
@@ -201,7 +316,7 @@ export default function App() {
         {currentScreen === 'event_detail' && (
           <EventDetailView
             event={selectedEvent}
-            onBack={() => handleNavigate('events')}
+            onBack={handleGoBack}
             onProceedToCheckout={handleProceedToCheckout}
             onNavigate={handleNavigate}
           />
@@ -213,7 +328,7 @@ export default function App() {
               setUser(loggedUser);
               handleNavigate('profile');
             }}
-            onCancel={() => handleNavigate('home')}
+            onCancel={handleGoBack}
           />
         )}
 
@@ -235,10 +350,10 @@ export default function App() {
                   Fazer Login / Cadastro
                 </button>
                 <button
-                  onClick={() => handleNavigate('home')}
+                  onClick={handleGoBack}
                   className="px-5 py-2.5 bg-[#181818] border border-[#2a2a2a] text-zinc-300 font-semibold text-xs rounded-xl hover:text-white hover:bg-[#222222] transition"
                 >
-                  Voltar ao Início
+                  Voltar
                 </button>
               </div>
             </div>
@@ -264,7 +379,7 @@ export default function App() {
             selectedBatches={selectedBatches}
             user={user}
             onSuccess={handleCheckoutSuccess}
-            onCancel={() => handleNavigate('event_detail')}
+            onCancel={handleGoBack}
             onNavigate={handleNavigate}
           />
         )}
@@ -274,6 +389,7 @@ export default function App() {
             tickets={tickets}
             selectedTicket={selectedTicket}
             onNavigate={handleNavigate}
+            onBack={handleGoBack}
           />
         )}
 
@@ -306,6 +422,7 @@ export default function App() {
             <CheckinView
               tickets={tickets}
               onNavigate={handleNavigate}
+              onBack={handleGoBack}
             />
           )
         )}
@@ -381,7 +498,7 @@ export default function App() {
         <BottomNav
           currentScreen={currentScreen}
           onNavigate={handleNavigate}
-          isOperator={user?.role === 'CHECKIN_OPERATOR' || user?.role === 'SUPER_ADMIN'}
+          isOperator={Boolean(user && ['CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(user.role))}
         />
       )}
 
