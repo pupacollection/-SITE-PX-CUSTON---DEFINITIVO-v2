@@ -48,6 +48,22 @@ export default function App() {
   const [mercadoPagoConfig, setMercadoPagoConfig] = useState<MercadoPagoConfig>(INITIAL_MERCADO_PAGO_CONFIG);
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
+  // Sincronização de eventos reais do Supabase
+  const fetchEventsFromDatabase = React.useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('events')
+        .select('*, ticket_batches(*)')
+        .order('date', { ascending: true });
+
+      if (data && !error) {
+        setEvents(data);
+      }
+    } catch (err) {
+      console.warn('[PX CUSTON] Erro ao sincronizar eventos do Supabase:', err);
+    }
+  }, []);
+
   // Sincronização em tempo real com Supabase Auth
   React.useEffect(() => {
     // 1. Obter sessão atual do Supabase
@@ -75,22 +91,12 @@ export default function App() {
     });
 
     // 3. Consultar eventos da API oficial / Supabase
-    fetch('/api/events')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.events && Array.isArray(data.events) && data.events.length > 0) {
-          // Se vier do banco com estrutura completa, mesclar
-          if (data.source === 'supabase') {
-            setEvents(data.events);
-          }
-        }
-      })
-      .catch((err) => console.warn('[PX CUSTON] Erro ao sincronizar eventos:', err));
+    fetchEventsFromDatabase();
 
     return () => {
       subscription.unsubscribe();
     };
-  }, []);
+  }, [fetchEventsFromDatabase]);
 
   // Navigation handlers
   const handleNavigate = (screen: ActiveScreen, initialTab?: ProfileTab) => {
@@ -335,6 +341,7 @@ export default function App() {
                 <AdminDashboardView
                   events={events}
                   onNavigate={handleNavigate}
+                  onRefreshEvents={fetchEventsFromDatabase}
                 />
               )}
               {currentScreen === 'admin_payments' && (

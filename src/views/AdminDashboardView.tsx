@@ -21,10 +21,12 @@ import {
   AlertCircle,
   Eye,
 } from 'lucide-react';
+import { AdminEventsManager } from '../components/admin/AdminEventsManager';
 
 interface AdminDashboardViewProps {
   events: EventItem[];
   onNavigate: (screen: ActiveScreen) => void;
+  onRefreshEvents?: () => void;
 }
 
 interface AdminOrderRow {
@@ -43,8 +45,9 @@ interface AdminOrderRow {
 export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   events,
   onNavigate,
+  onRefreshEvents,
 }) => {
-  const [adminTab, setAdminTab] = useState<'dashboard' | 'orders'>('dashboard');
+  const [adminTab, setAdminTab] = useState<'dashboard' | 'events' | 'tickets' | 'orders' | 'users'>('dashboard');
   const [dateRange, setDateRange] = useState('01/11/2025 - 30/11/2025');
   const [ordersSearch, setOrdersSearch] = useState('');
   const [ordersFilter, setOrdersFilter] = useState<'all' | 'approved' | 'pending'>('all');
@@ -171,16 +174,24 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </button>
 
             <button
-              onClick={() => onNavigate('events')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              onClick={() => setAdminTab('events')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+                adminTab === 'events'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
             >
               <Calendar className="w-4 h-4" />
               <span>Eventos</span>
             </button>
 
             <button
-              onClick={() => onNavigate('digital_ticket')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              onClick={() => setAdminTab('tickets')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+                adminTab === 'tickets'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
             >
               <Ticket className="w-4 h-4" />
               <span>Ingressos</span>
@@ -205,8 +216,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </button>
 
             <button
-              onClick={() => onNavigate('profile')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              onClick={() => setAdminTab('users')}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+                adminTab === 'users'
+                  ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
+              }`}
             >
               <Users className="w-4 h-4" />
               <span>Usuários</span>
@@ -717,6 +732,151 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                     )}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SEÇÃO 3: GESTÃO DE EVENTOS */}
+        {adminTab === 'events' && (
+          <AdminEventsManager onEventChange={onRefreshEvents} />
+        )}
+
+        {/* SEÇÃO 4: GESTÃO DE INGRESSOS */}
+        {adminTab === 'tickets' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1c1c1c] pb-6">
+              <div>
+                <h1 className="text-2xl font-black uppercase tracking-tight text-white font-heading">
+                  Gestão de Ingressos
+                </h1>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Controle de lotes, estoque, precificação e regras de emissão
+                </p>
+              </div>
+            </div>
+
+            {/* Banner de Módulo em Implementação */}
+            <div className="bg-[#141414] border border-amber-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 shrink-0">
+                <Ticket className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                    Módulo em implementação
+                  </span>
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono">
+                    Fase de Estruturação
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">
+                  O painel de configuração de lotes, virada automática de preços e inventário de ingressos está em fase de estruturação técnica.
+                  Para auditar vendas reais e status de pagamento, consulte a aba Pedidos ou valide ingressos no terminal PX CHECK-IN.
+                </p>
+              </div>
+            </div>
+
+            {/* Ações Relacionadas Conectadas */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-[#121212] border border-[#222] p-5 rounded-2xl space-y-3">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <ShoppingBag className="w-4 h-4 text-[#FF1A2D]" />
+                  <span>Auditoria de Pedidos Oficiais</span>
+                </h4>
+                <p className="text-xs text-zinc-400">
+                  Consulte os pedidos oficiais registrados no Supabase com identificador de pagamento Mercado Pago.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setAdminTab('orders')}
+                  className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#333] text-white text-xs font-bold px-4 py-2 rounded-xl transition inline-flex items-center gap-2"
+                >
+                  <Eye className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                  <span>Ver Pedidos ({orders.length})</span>
+                </button>
+              </div>
+
+              <div className="bg-[#121212] border border-[#222] p-5 rounded-2xl space-y-3">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-[#FF1A2D]" />
+                  <span>Terminal PX CHECK-IN</span>
+                </h4>
+                <p className="text-xs text-zinc-400">
+                  Validação de ingressos em tempo real com leitura de QR Code para portaria e operadores.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('checkin')}
+                  className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#333] text-white text-xs font-bold px-4 py-2 rounded-xl transition inline-flex items-center gap-2"
+                >
+                  <Clock className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                  <span>Abrir PX Check-in</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SEÇÃO 5: GESTÃO DE USUÁRIOS */}
+        {adminTab === 'users' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1c1c1c] pb-6">
+              <div>
+                <h1 className="text-2xl font-black uppercase tracking-tight text-white font-heading">
+                  Gestão de Usuários
+                </h1>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Auditoria de perfis e níveis de permissão (RBAC) no sistema
+                </p>
+              </div>
+            </div>
+
+            {/* Banner de Módulo em Implementação */}
+            <div className="bg-[#141414] border border-amber-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 shrink-0">
+                <Users className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                    Módulo em implementação
+                  </span>
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono">
+                    Fase de Estruturação
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">
+                  O módulo de atribuição de papéis (RBAC) e gerenciamento de permissões pelo PX CONTROL está em fase de estruturação.
+                  Atualmente, as permissões são validadas estritamente via Row Level Security (RLS) e regras de banco no Supabase.
+                </p>
+              </div>
+            </div>
+
+            {/* Resumo de Usuários no Banco Oficial */}
+            <div className="bg-[#121212] border border-[#222] rounded-2xl p-6 space-y-4">
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider font-heading">
+                Status de Autenticação e Perfis (Supabase)
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
+                  <span className="text-xs text-zinc-400 block mb-1">Perfis Registrados</span>
+                  <span className="text-xl font-bold font-mono text-white">
+                    {profilesCount !== null ? profilesCount : 'Consultando...'}
+                  </span>
+                </div>
+                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
+                  <span className="text-xs text-zinc-400 block mb-1">Níveis de Permissão</span>
+                  <span className="text-xs font-mono text-zinc-300 block">
+                    SUPER_ADMIN, ADMIN, CHECKIN_OPERATOR, CLIENT
+                  </span>
+                </div>
+                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
+                  <span className="text-xs text-zinc-400 block mb-1">Segurança Ativa</span>
+                  <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Supabase Auth + RLS
+                  </span>
+                </div>
               </div>
             </div>
           </div>

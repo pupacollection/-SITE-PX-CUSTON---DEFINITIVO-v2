@@ -19,13 +19,14 @@ export const EventsCatalogView: React.FC<EventsCatalogViewProps> = ({
   const allTags = ['Todos', 'Carros Rebaixados', 'Som Automotivo', 'Carros Antigos'];
 
   const filteredEvents = events.filter((e) => {
+    const isPublished = e.status ? e.status === 'published' : true;
     const matchesSearch =
       e.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       e.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
       e.description.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesTag =
-      selectedTag === 'Todos' || e.tags.some((t) => t.toLowerCase().includes(selectedTag.toLowerCase()));
-    return matchesSearch && matchesTag;
+      selectedTag === 'Todos' || (e.tags || []).some((t) => t.toLowerCase().includes(selectedTag.toLowerCase()));
+    return matchesSearch && matchesTag && isPublished;
   });
 
   return (

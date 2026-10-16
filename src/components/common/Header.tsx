@@ -81,6 +81,21 @@ export const Header: React.FC<HeaderProps> = ({
             Visão App / PWA
           </button>
 
+          {/* Atalho Oficial PX CONTROL para Administradores */}
+          {user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+            <button
+              onClick={() => handleNav('admin_dashboard')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs transition ${
+                currentScreen === 'admin_dashboard'
+                  ? 'bg-[#FF1A2D] border-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
+                  : 'bg-[#161616] border-[#333] text-[#FF1A2D] hover:bg-[#FF1A2D] hover:text-white font-bold'
+              }`}
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>PX CONTROL</span>
+            </button>
+          )}
+
           {/* Quick Mockup Screen Explorer Dropdown */}
           <div className="relative">
             <button
@@ -152,34 +167,45 @@ export const Header: React.FC<HeaderProps> = ({
                   Operador & Gestão (PX CONTROL)
                 </div>
                 <div className="py-1">
-                  <button
-                    onClick={() => handleNav('checkin')}
-                    className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2 text-white"
-                  >
-                    <span className="w-5 text-[#FF1A2D] font-bold">08</span>
-                    <span className="font-semibold text-[#FF1A2D]">PX CHECK-IN (Operador)</span>
-                  </button>
-                  <button
-                    onClick={() => handleNav('admin_dashboard')}
-                    className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2 text-white"
-                  >
-                    <span className="w-5 text-[#FF1A2D] font-bold">09</span>
-                    <span className="font-semibold">PX CONTROL — Dashboard</span>
-                  </button>
-                  <button
-                    onClick={() => handleNav('admin_payments')}
-                    className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2"
-                  >
-                    <span className="w-5 text-[#FF1A2D] font-bold">10</span>
-                    <span>Configurações Mercado Pago</span>
-                  </button>
-                  <button
-                    onClick={() => handleNav('admin_cache')}
-                    className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2"
-                  >
-                    <span className="w-5 text-[#FF1A2D] font-bold">11</span>
-                    <span>Limpeza de Cache</span>
-                  </button>
+                  {user && ['CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+                    <button
+                      onClick={() => handleNav('checkin')}
+                      className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2 text-white"
+                    >
+                      <span className="w-5 text-[#FF1A2D] font-bold">08</span>
+                      <span className="font-semibold text-[#FF1A2D]">PX CHECK-IN (Operador)</span>
+                    </button>
+                  )}
+                  {user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+                    <>
+                      <button
+                        onClick={() => handleNav('admin_dashboard')}
+                        className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2 text-white"
+                      >
+                        <span className="w-5 text-[#FF1A2D] font-bold">09</span>
+                        <span className="font-semibold">PX CONTROL — Dashboard</span>
+                      </button>
+                      <button
+                        onClick={() => handleNav('admin_payments')}
+                        className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2"
+                      >
+                        <span className="w-5 text-[#FF1A2D] font-bold">10</span>
+                        <span>Configurações Mercado Pago</span>
+                      </button>
+                      <button
+                        onClick={() => handleNav('admin_cache')}
+                        className="w-full text-left px-3 py-2 hover:bg-[#1a1a1a] flex items-center gap-2"
+                      >
+                        <span className="w-5 text-[#FF1A2D] font-bold">11</span>
+                        <span>Limpeza de Cache</span>
+                      </button>
+                    </>
+                  )}
+                  {(!user || (!['ADMIN', 'SUPER_ADMIN', 'CHECKIN_OPERATOR'].includes(user.role))) && (
+                    <div className="px-3 py-2 text-[11px] text-zinc-500 italic">
+                      Acesso restrito à equipe autorizada PX CUSTON.
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -212,16 +238,35 @@ export const Header: React.FC<HeaderProps> = ({
           {/* User Profile or Login Button */}
           {user ? (
             <div className="flex items-center gap-2">
+              {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+                <button
+                  onClick={() => handleNav('admin_dashboard')}
+                  className="flex items-center gap-1.5 bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-[11px] sm:text-xs font-bold uppercase tracking-wider px-2.5 sm:px-3 py-1.5 rounded-lg shadow-[0_0_15px_rgba(255,26,45,0.4)] transition"
+                  title="Acessar Painel PX CONTROL"
+                >
+                  <Shield className="w-3.5 h-3.5" />
+                  <span>PX CONTROL</span>
+                </button>
+              )}
+
               <button
                 onClick={() => handleNav('profile')}
                 className="flex items-center gap-2 bg-[#141414] hover:bg-[#1e1e1e] border border-[#2a2a2a] pl-2 pr-3 py-1.5 rounded-full transition"
               >
                 <div className="w-7 h-7 rounded-full bg-[#FF1A2D] text-white font-bold text-xs flex items-center justify-center">
-                  {user.full_name.charAt(0)}
+                  {user.full_name ? user.full_name.charAt(0).toUpperCase() : 'U'}
                 </div>
                 <div className="text-left hidden sm:block">
                   <p className="text-xs font-semibold text-white leading-tight">{user.full_name}</p>
-                  <p className="text-[10px] text-zinc-400 leading-tight">Cliente PX</p>
+                  <p className="text-[10px] text-zinc-400 leading-tight">
+                    {user.role === 'SUPER_ADMIN'
+                      ? 'Super Admin'
+                      : user.role === 'ADMIN'
+                      ? 'Administrador'
+                      : user.role === 'CHECKIN_OPERATOR'
+                      ? 'Operador'
+                      : 'Cliente PX'}
+                  </p>
                 </div>
               </button>
             </div>
@@ -247,6 +292,27 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Mobile Drawer Menu */}
       {mobileMenuOpen && (
         <div className="md:hidden bg-[#0a0a0a] border-b border-[#222] px-4 pt-3 pb-6 space-y-3 animate-fade-in">
+          {/* Acesso Oficial PX CONTROL para Administradores no Mobile */}
+          {user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+            <div className="p-3 bg-[#181112] border border-[#FF1A2D]/40 rounded-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#FF1A2D] uppercase flex items-center gap-1.5">
+                  <Shield className="w-4 h-4" /> Painel PX CONTROL
+                </span>
+                <span className="text-[10px] bg-[#FF1A2D] text-white font-mono font-bold px-2 py-0.5 rounded">
+                  {user.role === 'SUPER_ADMIN' ? 'SUPER ADMIN' : 'ADMIN'}
+                </span>
+              </div>
+              <button
+                onClick={() => handleNav('admin_dashboard')}
+                className="w-full bg-[#FF1A2D] hover:bg-[#e00f21] text-white font-bold text-xs py-2 rounded-lg flex items-center justify-center gap-2 shadow-[0_0_12px_rgba(255,26,45,0.3)] transition"
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" />
+                <span>Acessar Painel Administrativo</span>
+              </button>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2 text-xs">
             <button
               onClick={() => handleNav('home')}
@@ -290,24 +356,30 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <span>07. Ingresso QR</span>
             </button>
-            <button
-              onClick={() => handleNav('checkin')}
-              className="text-left p-2.5 rounded-lg bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 text-[#FF1A2D] font-bold flex items-center gap-2"
-            >
-              <span>08. PX Check-in</span>
-            </button>
-            <button
-              onClick={() => handleNav('admin_dashboard')}
-              className="text-left p-2.5 rounded-lg bg-[#181818] border border-[#333] text-white font-bold flex items-center gap-2"
-            >
-              <span>09. PX CONTROL</span>
-            </button>
-            <button
-              onClick={() => handleNav('admin_payments')}
-              className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
-            >
-              <span>10. Config Pagamento</span>
-            </button>
+            {user && ['CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+              <button
+                onClick={() => handleNav('checkin')}
+                className="text-left p-2.5 rounded-lg bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 text-[#FF1A2D] font-bold flex items-center gap-2"
+              >
+                <span>08. PX Check-in</span>
+              </button>
+            )}
+            {user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+              <>
+                <button
+                  onClick={() => handleNav('admin_dashboard')}
+                  className="text-left p-2.5 rounded-lg bg-[#181818] border border-[#333] text-white font-bold flex items-center gap-2"
+                >
+                  <span>09. PX CONTROL</span>
+                </button>
+                <button
+                  onClick={() => handleNav('admin_payments')}
+                  className="text-left p-2.5 rounded-lg bg-[#141414] hover:bg-[#1c1c1c] text-white flex items-center gap-2"
+                >
+                  <span>10. Config Pagamento</span>
+                </button>
+              </>
+            )}
           </div>
 
           <div className="pt-2 border-t border-[#1f1f1f] flex items-center justify-between">

@@ -21,6 +21,7 @@ import {
   AlertCircle,
   Check,
   Sparkles,
+  LayoutDashboard,
 } from 'lucide-react';
 
 export type ProfileTab = 'profile' | 'tickets' | 'orders' | 'vehicles' | 'notifications';
@@ -324,12 +325,55 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </div>
             <div className="min-w-0">
               <h3 className="text-sm font-bold truncate text-white">{user.full_name}</h3>
-              <p className="text-[11px] text-zinc-400 truncate">{user.email}</p>
-              <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-semibold mt-0.5">
-                <CheckCircle2 className="w-3 h-3" /> Verificado
-              </span>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-semibold">
+                  <CheckCircle2 className="w-3 h-3" /> Verificado
+                </span>
+                {user.role === 'SUPER_ADMIN' ? (
+                  <span className="text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-[#FF1A2D]/20 text-[#FF1A2D] border border-[#FF1A2D]/40">
+                    SUPER ADMIN
+                  </span>
+                ) : user.role === 'ADMIN' ? (
+                  <span className="text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-[#FF1A2D]/20 text-[#FF1A2D] border border-[#FF1A2D]/40">
+                    ADMIN
+                  </span>
+                ) : user.role === 'CHECKIN_OPERATOR' ? (
+                  <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-blue-950/40 text-blue-400 border border-blue-500/30">
+                    OPERADOR
+                  </span>
+                ) : (
+                  <span className="text-[9px] font-mono text-zinc-400">
+                    CLIENTE PX
+                  </span>
+                )}
+              </div>
             </div>
           </div>
+
+          {/* Atalho de Destaque PX CONTROL para Administradores */}
+          {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+            <div className="bg-[#181112] border border-[#FF1A2D]/40 p-3.5 rounded-2xl mb-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-[#FF1A2D] uppercase tracking-wider flex items-center gap-1.5 font-heading">
+                  <ShieldCheck className="w-4 h-4" /> PX CONTROL
+                </span>
+                <span className="text-[9px] bg-[#FF1A2D] text-white font-extrabold px-1.5 py-0.5 rounded uppercase font-mono">
+                  {user.role}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-300 leading-snug">
+                Painel administrativo de métricas, pedidos oficiais e configurações do sistema.
+              </p>
+              <button
+                type="button"
+                onClick={() => onNavigate('admin_dashboard')}
+                className="w-full bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-2 shadow-[0_0_12px_rgba(255,26,45,0.3)] transition"
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" />
+                <span>Abrir PX CONTROL</span>
+              </button>
+            </div>
+          )}
 
           <div className="bg-[#121212] border border-[#222] rounded-2xl p-2 space-y-1">
             {/* 1. Meu Perfil */}
@@ -425,14 +469,26 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               )}
             </button>
 
-            {/* 6. Configurações Mercado Pago */}
-            <button
-              onClick={() => onNavigate('admin_payments')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
-            >
-              <Settings className="w-4 h-4" />
-              <span>Configurações</span>
-            </button>
+            {/* Atalhos Administrativos PX CONTROL (exclusivo para ADMIN e SUPER_ADMIN) */}
+            {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+              <div className="pt-2 border-t border-[#1e1e1e] space-y-1">
+                <button
+                  onClick={() => onNavigate('admin_dashboard')}
+                  className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-3 bg-[#FF1A2D]/15 border border-[#FF1A2D]/40 text-[#FF1A2D] hover:bg-[#FF1A2D] hover:text-white transition shadow-[0_0_15px_rgba(255,26,45,0.2)]"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Painel PX CONTROL</span>
+                </button>
+
+                <button
+                  onClick={() => onNavigate('admin_payments')}
+                  className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Configurações do Sistema</span>
+                </button>
+              </div>
+            )}
 
             <div className="pt-2 border-t border-[#1e1e1e]">
               <button
@@ -483,6 +539,31 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <div className="mb-4 bg-emerald-950/50 border border-emerald-500/50 text-emerald-200 text-xs p-3 rounded-xl flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   <span>Dados atualizados com sucesso no Supabase!</span>
+                </div>
+              )}
+
+              {/* Informação de Papel Administrativo */}
+              {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
+                <div className="mb-5 bg-[#181112] border border-[#FF1A2D]/30 text-xs p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <ShieldCheck className="w-5 h-5 text-[#FF1A2D] shrink-0" />
+                    <div>
+                      <span className="text-zinc-200 block">
+                        Privilégio de acesso: <strong className="text-white">{user.role === 'SUPER_ADMIN' ? 'Super Administrador' : 'Administrador'}</strong>
+                      </span>
+                      <span className="text-[11px] text-zinc-400">
+                        Você possui autorização para acessar o painel PX CONTROL.
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('admin_dashboard')}
+                    className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold px-3.5 py-2 rounded-xl shrink-0 transition flex items-center justify-center gap-1.5 shadow-[0_0_10px_rgba(255,26,45,0.3)]"
+                  >
+                    <LayoutDashboard className="w-3.5 h-3.5" />
+                    <span>Acessar PX CONTROL</span>
+                  </button>
                 </div>
               )}
 
