@@ -12,6 +12,9 @@
     "start": "node server.js",
     "db:migrate": "tsx scripts/migrate.ts",
     "admin:init": "tsx scripts/init-super-admin.ts",
+    "test:runtime": "tsx scripts/test-api-runtime.ts",
+    "test:homolog": "tsx scripts/test-homologation-postgres.ts",
+    "test:gate": "tsx scripts/test-gate-validation.ts",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

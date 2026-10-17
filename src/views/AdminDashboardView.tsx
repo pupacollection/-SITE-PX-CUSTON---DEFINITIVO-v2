@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { AdminEventsManager } from '../components/admin/AdminEventsManager';
 import { AdminBrandingManager } from '../components/admin/AdminBrandingManager';
+import { AdminBatchesManager } from '../components/admin/AdminBatchesManager';
 
 interface AdminDashboardViewProps {
   events: EventItem[];
@@ -50,12 +51,14 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onRefreshEvents,
 }) => {
   const [adminTab, setAdminTab] = useState<'dashboard' | 'events' | 'tickets' | 'orders' | 'users' | 'branding'>('dashboard');
+  const [selectedBatchEventId, setSelectedBatchEventId] = useState<string>('');
   const [dateRange, setDateRange] = useState('01/11/2025 - 30/11/2025');
   const [ordersSearch, setOrdersSearch] = useState('');
   const [ordersFilter, setOrdersFilter] = useState<'all' | 'approved' | 'pending'>('all');
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [profilesCount, setProfilesCount] = useState<number | null>(null);
+  const [expiringOrders, setExpiringOrders] = useState(false);
 
   // Inicialização estrita com array vazio (dados reais consultados exclusivamente do Supabase)
   const [orders, setOrders] = useState<AdminOrderRow[]>([]);
@@ -149,6 +152,32 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     return matchStatus && matchSearch;
   });
 
+  const handleExpirePendingOrders = async () => {
+    setExpiringOrders(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch('/api/admin/orders/expire-pending', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ timeout_minutes: 15 }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchAdminOrders();
+        alert(`Verificação de expiração executada com sucesso! Pedidos cancelados e estoque liberado: ${data.result?.expired_orders_count || 0}`);
+      } else {
+        alert(data.error || 'Falha ao executar rotina de expiração.');
+      }
+    } catch (e: any) {
+      alert('Erro de conexão ao verificar expirações: ' + e.message);
+    } finally {
+      setExpiringOrders(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#000000] text-white flex flex-col md:flex-row">
       {/* Sidebar: PX CONTROL */}
@@ -188,7 +217,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </button>
 
             <button
-              onClick={() => setAdminTab('tickets')}
+              onClick={() => {
+                setSelectedBatchEventId('');
+                setAdminTab('tickets');
+              }}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
                 adminTab === 'tickets'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
@@ -196,7 +228,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               }`}
             >
               <Ticket className="w-4 h-4" />
-              <span>Ingressos</span>
+              <span>Lotes & Ingressos</span>
             </button>
 
             {/* Menu Pedidos: Alterna para aba de Gestão de Pedidos (Todos) */}
@@ -579,13 +611,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </p>
               </div>
 
-              <button
-                onClick={() => alert('Exportando relatório de pedidos em formato CSV...')}
-                className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition flex items-center gap-2 shrink-0"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Exportar Pedidos</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleExpirePendingOrders}
+                  disabled={expiringOrders}
+                  className="bg-[#181818] hover:bg-[#222] border border-[#2a2a2a] text-zinc-300 text-xs font-semibold px-3.5 py-2.5 rounded-xl transition flex items-center gap-2 shrink-0 disabled:opacity-50"
+                  title="Verifica pedidos pendentes há mais de 15 minutos e devolve o estoque aos lotes"
+                >
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{expiringOrders ? 'Verificando...' : 'Expirar Pendentes'}</span>
+                </button>
+
+                <button
+                  onClick={() => alert('Exportando relatório de pedidos em formato CSV...')}
+                  className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition flex items-center gap-2 shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Exportar Pedidos</span>
+                </button>
+              </div>
             </div>
 
             {/* Metrics Header for Orders */}
@@ -747,6 +791,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded-full">
                                 <CheckCircle2 className="w-3 h-3" /> Aprovado
                               </span>
+                            ) : ord.payment_status === 'cancelled' ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-zinc-400 bg-zinc-900 border border-zinc-700 px-2 py-0.5 rounded-full">
+                                <AlertCircle className="w-3 h-3 text-[#FF1A2D]" /> Cancelado / Expirado
+                              </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-400 bg-amber-950/40 border border-amber-500/30 px-2 py-0.5 rounded-full">
                                 <Clock className="w-3 h-3" /> Pendente
@@ -771,83 +819,21 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
         {/* SEÇÃO 3: GESTÃO DE EVENTOS */}
         {adminTab === 'events' && (
-          <AdminEventsManager onEventChange={onRefreshEvents} />
+          <AdminEventsManager
+            onEventChange={onRefreshEvents}
+            onManageBatches={(eventId) => {
+              setSelectedBatchEventId(eventId);
+              setAdminTab('tickets');
+            }}
+          />
         )}
 
-        {/* SEÇÃO 4: GESTÃO DE INGRESSOS */}
+        {/* SEÇÃO 4: GESTÃO DE LOTES E INGRESSOS */}
         {adminTab === 'tickets' && (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1c1c1c] pb-6">
-              <div>
-                <h1 className="text-2xl font-black uppercase tracking-tight text-white font-heading">
-                  Gestão de Ingressos
-                </h1>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Controle de lotes, estoque, precificação e regras de emissão
-                </p>
-              </div>
-            </div>
-
-            {/* Banner de Módulo em Implementação */}
-            <div className="bg-[#141414] border border-amber-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 shrink-0">
-                <Ticket className="w-6 h-6" />
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
-                    Módulo em implementação
-                  </span>
-                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono">
-                    Fase de Estruturação
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-300 leading-relaxed">
-                  O painel de configuração de lotes, virada automática de preços e inventário de ingressos está em fase de estruturação técnica.
-                  Para auditar vendas reais e status de pagamento, consulte a aba Pedidos ou valide ingressos no terminal PX CHECK-IN.
-                </p>
-              </div>
-            </div>
-
-            {/* Ações Relacionadas Conectadas */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-[#121212] border border-[#222] p-5 rounded-2xl space-y-3">
-                <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                  <ShoppingBag className="w-4 h-4 text-[#FF1A2D]" />
-                  <span>Auditoria de Pedidos Oficiais</span>
-                </h4>
-                <p className="text-xs text-zinc-400">
-                  Consulte os pedidos oficiais registrados no Supabase com identificador de pagamento Mercado Pago.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setAdminTab('orders')}
-                  className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#333] text-white text-xs font-bold px-4 py-2 rounded-xl transition inline-flex items-center gap-2"
-                >
-                  <Eye className="w-3.5 h-3.5 text-[#FF1A2D]" />
-                  <span>Ver Pedidos ({orders.length})</span>
-                </button>
-              </div>
-
-              <div className="bg-[#121212] border border-[#222] p-5 rounded-2xl space-y-3">
-                <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-[#FF1A2D]" />
-                  <span>Terminal PX CHECK-IN</span>
-                </h4>
-                <p className="text-xs text-zinc-400">
-                  Validação de ingressos em tempo real com leitura de QR Code para portaria e operadores.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('checkin')}
-                  className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#333] text-white text-xs font-bold px-4 py-2 rounded-xl transition inline-flex items-center gap-2"
-                >
-                  <Clock className="w-3.5 h-3.5 text-[#FF1A2D]" />
-                  <span>Abrir PX Check-in</span>
-                </button>
-              </div>
-            </div>
-          </div>
+          <AdminBatchesManager
+            initialEventId={selectedBatchEventId}
+            onBatchesUpdated={onRefreshEvents}
+          />
         )}
 
         {/* SEÇÃO 5: GESTÃO DE USUÁRIOS */}

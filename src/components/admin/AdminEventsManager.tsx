@@ -29,13 +29,15 @@ import {
   ShieldCheck,
   FileText,
   AlertTriangle,
+  Ticket,
 } from 'lucide-react';
 
 interface AdminEventsManagerProps {
   onEventChange?: () => void;
+  onManageBatches?: (eventId: string) => void;
 }
 
-export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({ onEventChange }) => {
+export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({ onEventChange, onManageBatches }) => {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -592,24 +594,48 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({ onEventC
                 <div className="pt-2 border-t border-[#1e1e1e] space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-zinc-500">
                     <span className="font-mono text-zinc-400">/{evt.slug}</span>
-                    <span className="text-zinc-400">{evt.ticket_batches?.length || 0} lotes</span>
+                    {onManageBatches ? (
+                      <button
+                        type="button"
+                        onClick={() => onManageBatches(evt.id)}
+                        className="text-zinc-400 hover:text-[#FF1A2D] flex items-center gap-1 transition cursor-pointer"
+                        title="Gerenciar lotes deste evento"
+                      >
+                        <Ticket className="w-3 h-3 text-[#FF1A2D]" />
+                        <span className="font-semibold">{evt.ticket_batches?.length || 0} lotes</span>
+                      </button>
+                    ) : (
+                      <span className="text-zinc-400">{evt.ticket_batches?.length || 0} lotes</span>
+                    )}
                   </div>
 
                   {/* Botões de Ação */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className={`grid ${onManageBatches ? 'grid-cols-3' : 'grid-cols-2'} gap-1.5 pt-1`}>
                     <button
                       type="button"
                       onClick={() => handleOpenEditModal(evt)}
-                      className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#2e2e2e] text-white text-xs font-semibold py-2 px-3 rounded-xl transition flex items-center justify-center gap-1.5"
+                      className="bg-[#1c1c1c] hover:bg-[#252525] border border-[#2e2e2e] text-white text-[11px] font-semibold py-2 px-2 rounded-xl transition flex items-center justify-center gap-1"
                     >
-                      <Edit3 className="w-3.5 h-3.5 text-zinc-400" />
+                      <Edit3 className="w-3 h-3 text-zinc-400" />
                       <span>Editar</span>
                     </button>
+
+                    {onManageBatches && (
+                      <button
+                        type="button"
+                        onClick={() => onManageBatches(evt.id)}
+                        className="bg-[#1c1c1c] hover:bg-[#222] border border-[#2e2e2e] hover:border-[#FF1A2D]/40 text-[#FF1A2D] text-[11px] font-semibold py-2 px-2 rounded-xl transition flex items-center justify-center gap-1"
+                        title="Gerenciar lotes deste evento"
+                      >
+                        <Ticket className="w-3 h-3" />
+                        <span>Lotes</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
                       onClick={() => handlePromptToggleStatus(evt)}
-                      className={`text-xs font-semibold py-2 px-3 rounded-xl border transition flex items-center justify-center gap-1.5 ${
+                      className={`text-[11px] font-semibold py-2 px-2 rounded-xl border transition flex items-center justify-center gap-1 ${
                         evt.status === 'published'
                           ? 'bg-[#181818] border-amber-500/30 text-amber-300 hover:bg-amber-950/30'
                           : 'bg-[#181818] border-emerald-500/30 text-emerald-300 hover:bg-emerald-950/30'
@@ -617,12 +643,12 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({ onEventC
                     >
                       {evt.status === 'published' ? (
                         <>
-                          <EyeOff className="w-3.5 h-3.5" />
-                          <span>Despublicar</span>
+                          <EyeOff className="w-3 h-3" />
+                          <span>Pausar</span>
                         </>
                       ) : (
                         <>
-                          <Eye className="w-3.5 h-3.5" />
+                          <Eye className="w-3 h-3" />
                           <span>Publicar</span>
                         </>
                       )}

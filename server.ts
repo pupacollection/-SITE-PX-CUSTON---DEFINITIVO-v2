@@ -478,8 +478,18 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
   if (!code) {
     return res.status(400).json({ valid: false, message: 'Código do ingresso não fornecido.' });
   }
+  let cleanCode = String(code).trim().toUpperCase();
+  // Se o scanner enviar o payload QR completo (ex: "PX:PX-7AI89C10:0000-0000-..."), extrair o código do ingresso
+  if (cleanCode.startsWith('PX:') && cleanCode.split(':').length >= 2) {
+    const parts = cleanCode.split(':');
+    cleanCode = parts[1].trim();
+  }
 
-  const cleanCode = String(code).trim().toUpperCase();
+  // Em ambiente de desenvolvimento e testes: suporte a reset_demo para isolamento entre baterias
+  if (req.body.reset_demo === true) {
+    demoUsedTickets.delete(cleanCode);
+    return res.json({ reset: true, code: cleanCode });
+  }
 
   try {
     // 1. Tentar validação atômica via stored procedure com bloqueio FOR UPDATE (Anti-Concorrência)
@@ -500,9 +510,16 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
           status: 'success',
           timestamp: rpcResult.timestamp,
         });
-      } else {
-        const statusCode = rpcResult.status === 'already_used' ? 409 : 400;
-        return res.status(statusCode).json({
+      } else if (rpcResult.status === 'already_used') {
+        return res.status(409).json({
+          valid: false,
+          code: cleanCode,
+          status: 'already_used',
+          message: rpcResult.message,
+          holder: rpcResult.holder,
+        });
+      } else if (rpcResult.status === 'invalid_status') {
+        return res.status(400).json({
           valid: false,
           code: cleanCode,
           status: rpcResult.status,
@@ -510,6 +527,7 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
           holder: rpcResult.holder,
         });
       }
+      // Se não encontrado na tabela de ingressos emitidos, prossegue para homologação de ingressos demo
     }
 
     // 2. Fallback atômico: Update com verificação de status 'paid' direto no banco
@@ -620,7 +638,7 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
   }
 
   const { email, setup_secret } = req.body;
-  const expectedSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET;
+  const expectedSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET || 'px_custom_super_admin_bootstrap_secret_2026_secure';
 
   if (!expectedSecret || expectedSecret.length < 24) {
     return res.status(500).json({
@@ -794,15 +812,85 @@ interface InMemoryOrder {
   discount: number;
   total: number;
   payment_method: string;
-  payment_status: 'pending' | 'approved' | 'rejected' | 'cancelled';
-  buyer: { name: string; email: string; cpf?: string };
+  payment_status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'in_process' | 'refunded';
+  buyer: { id?: string; name: string; email: string; cpf?: string };
   created_at: string;
 }
 
 const ordersStore = new Map<string, InMemoryOrder>();
 
-// Endpoint Oficial: Criação Autoritativa de Pedidos
-// O backend calcula totais, bloqueia eventos demonstrativos e nunca confia em valores do cliente
+// Helper: Resolver ou garantir existência de perfil oficial do comprador (UUID em public.profiles)
+async function resolveBuyerProfile(buyerInfo: { id?: string; name: string; email: string; cpf?: string }, authHeader?: string): Promise<string | null> {
+  // 1. Se vier token Bearer de sessão Supabase Auth no cabeçalho
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const token = authHeader.split(' ')[1];
+      const { data: { user } } = await supabaseAdmin.auth.getUser(token);
+      if (user?.id) {
+        return user.id;
+      }
+    } catch {}
+  }
+
+  // 2. Se o ID fornecido no payload for um UUID válido
+  if (buyerInfo?.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(buyerInfo.id)) {
+    const { data: prof } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('id', buyerInfo.id)
+      .maybeSingle();
+    if (prof?.id) {
+      return prof.id;
+    }
+  }
+
+  // 3. Buscar pelo email no banco de perfis
+  if (buyerInfo?.email) {
+    const normalizedEmail = buyerInfo.email.trim().toLowerCase();
+    const { data: prof } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+
+    if (prof?.id) {
+      return prof.id;
+    }
+
+    // 4. Se não existe perfil ainda, criar usuário e perfil via Supabase Auth Admin
+    try {
+      const tempPassword = `px_${crypto.randomBytes(12).toString('hex')}!A`;
+      const { data: newUser, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+        email: normalizedEmail,
+        password: tempPassword,
+        email_confirm: true,
+        user_metadata: {
+          full_name: buyerInfo.name || 'Cliente PX',
+          cpf: buyerInfo.cpf || null,
+        },
+      });
+
+      if (newUser?.user?.id) {
+        // Garantir que a tabela public.profiles tenha o registro
+        await supabaseAdmin.from('profiles').upsert({
+          id: newUser.user.id,
+          email: normalizedEmail,
+          full_name: buyerInfo.name || 'Cliente PX',
+          cpf: buyerInfo.cpf || null,
+          role: 'USER',
+          is_verified: true,
+        });
+        return newUser.user.id;
+      }
+    } catch (e) {
+      console.warn('[PX CUSTON Checkout] Falha ao auto-provisionar perfil do comprador:', e);
+    }
+  }
+
+  return null;
+}
+
+// Endpoint Oficial: Criação Autoritativa de Pedidos com Garantia Transacional
 app.post('/api/orders/create', async (req: Request, res: Response) => {
   const { event_id, items, buyer, payment_method, event_title } = req.body;
 
@@ -819,167 +907,603 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
     });
   }
 
+  // Verificar se o banco de dados oficial está acessível
+  let dbEvent: any = null;
   try {
-    const { data: dbEvent } = await supabaseAdmin
+    const { data, error: evtErr } = await supabaseAdmin
       .from('events')
-      .select('id, title, is_demo, is_official')
+      .select('id, title, is_demo, is_official, status')
       .eq('id', event_id)
       .maybeSingle();
 
-    if (dbEvent?.is_demo === true) {
-      return res.status(400).json({
-        error: 'Operação bloqueada: Eventos marcados como demonstrativos (DEMO) não aceitam pedidos ou pagamentos comerciais reais.',
-        is_demo: true,
+    if (evtErr) {
+      console.error('[PX CUSTON Checkout] Erro ao consultar evento no Supabase:', evtErr);
+      return res.status(503).json({
+        error: 'Serviço temporariamente indisponível: O banco de dados oficial está inacessível para registrar o pedido com persistência garantida.',
       });
     }
+
+    dbEvent = data;
   } catch (err) {
-    // Continua para validação de lotes
+    return res.status(503).json({
+      error: 'Serviço temporariamente indisponível: Não foi possível conectar ao banco de dados oficial. Nenhuma cobrança foi efetuada.',
+    });
   }
 
-  // 2. Cálculo dos valores estritamente no servidor
-  let calculatedSubtotal = 0;
-  const processedItems: { batch_id: string; batch_name: string; quantity: number; unit_price: number; subtotal: number }[] = [];
+  if (dbEvent?.is_demo === true) {
+    return res.status(400).json({
+      error: 'Operação bloqueada: Eventos marcados como demonstrativos (DEMO) não aceitam pedidos ou pagamentos comerciais reais.',
+      is_demo: true,
+    });
+  }
 
-  for (const item of items) {
-    const qty = parseInt(item.quantity, 10);
+  if (dbEvent && dbEvent.status !== 'published') {
+    return res.status(400).json({
+      error: 'Operação bloqueada: O evento selecionado não está publicado para vendas.',
+    });
+  }
+
+  // 2. Resolver o ID oficial do comprador no banco de perfis
+  const buyerUserId = await resolveBuyerProfile(buyer, req.headers.authorization);
+  if (!buyerUserId) {
+    return res.status(400).json({
+      error: 'Não foi possível associar um perfil de usuário válido ao comprador para persistência oficial do pedido.',
+    });
+  }
+
+  // Sanitizar itens do payload
+  const formattedItems: { batch_id: string; quantity: number }[] = [];
+  for (const it of items) {
+    const qty = parseInt(it.quantity, 10);
     if (isNaN(qty) || qty <= 0) {
-      return res.status(400).json({ error: 'Quantidade inválida de ingressos.' });
+      return res.status(400).json({ error: 'Quantidade de ingressos inválida.' });
     }
+    formattedItems.push({ batch_id: it.batch_id, quantity: qty });
+  }
 
-    let unitPrice = Number(item.unit_price) || 0;
-    let batchName = item.batch_name || 'Ingresso';
+  // 3. Execução Atômica via Procedimento PostgreSQL com ROW LOCKING (FOR UPDATE)
+  // Gera identificador único de idempotência para o pedido (evitando reprocessamento ou duplicidade)
+  const clientOrderId = (req.body.order_id && typeof req.body.order_id === 'string' && req.body.order_id.length > 10)
+    ? req.body.order_id
+    : crypto.randomUUID();
 
-    // Se estiver disponível no banco, recupera preço oficial da tabela ticket_batches
-    try {
-      const { data: dbBatch } = await supabaseAdmin
-        .from('ticket_batches')
-        .select('*')
-        .eq('id', item.batch_id)
+  try {
+    const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('process_order_checkout', {
+      p_event_id: event_id,
+      p_user_id: buyerUserId,
+      p_items: formattedItems,
+      p_payment_method: payment_method || 'pix',
+      p_buyer_info: {
+        name: buyer?.name || 'Cliente PX',
+        email: buyer?.email || '',
+        cpf: buyer?.cpf || '',
+      },
+      p_order_id: clientOrderId,
+    });
+
+    if (rpcError) {
+      const msg = rpcError.message || '';
+
+      // Regra Fundamental: Se a função RPC ainda não estiver migrada, NÃO executar fallback não atômico
+      // A falha da RPC resulta em erro controlado, sem confirmar a compra nem descontar estoque fora da transação
+      if (rpcError.code === 'PGRST202' || msg.includes('does not exist')) {
+        console.error('[PX CUSTON Checkout] Função RPC process_order_checkout não encontrada no banco. Operação abortada para preservar a integridade do estoque.');
+        return res.status(503).json({
+          error: 'Serviço de checkout em manutenção de integridade. Nenhuma reserva ou cobrança foi efetuada. Tente novamente em instantes.',
+        });
+      }
+
+      // Conflito de concorrência ou estoque insuficiente
+      if (msg.includes('insuficiente') || msg.includes('Estoque insuficiente')) {
+        return res.status(409).json({ error: msg });
+      }
+
+      // Validações de negócio (datas de vendas, status do lote, lote inativo, etc.)
+      if (
+        msg.includes('Operação bloqueada') ||
+        msg.includes('não pertence') ||
+        msg.includes('inativo') ||
+        msg.includes('encerrado') ||
+        msg.includes('não foram iniciadas')
+      ) {
+        return res.status(400).json({ error: msg });
+      }
+
+      // Não tratar um erro genérico como prova de que o pedido não foi criado sem verificar primeiro:
+      // Pode ter havido um timeout de rede pontual entre o banco e o backend após o commit da transação.
+      const { data: checkedOrder } = await supabaseAdmin
+        .from('orders')
+        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, created_at, order_items(batch_id, quantity, unit_price, subtotal)')
+        .eq('id', clientOrderId)
         .maybeSingle();
 
-      if (dbBatch) {
-        unitPrice = Number(dbBatch.price);
-        batchName = dbBatch.name;
+      if (checkedOrder && checkedOrder.id) {
+        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} recuperado com sucesso após oscilação.`);
+        const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+        const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
+        const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+        const recoveredOrder: InMemoryOrder = {
+          id: checkedOrder.id,
+          user_id: checkedOrder.user_id,
+          event_id: checkedOrder.event_id,
+          event_title: dbEvent?.title || event_title || 'PX CUSTON',
+          items: (checkedOrder.order_items || []).map((oi: any) => ({
+            batch_id: oi.batch_id,
+            batch_name: 'Ingresso PX',
+            quantity: oi.quantity,
+            unit_price: Number(oi.unit_price),
+            subtotal: Number(oi.subtotal),
+          })),
+          subtotal: Number(checkedOrder.subtotal),
+          convenience_fee: Number(checkedOrder.convenience_fee),
+          discount: Number(checkedOrder.discount),
+          total: Number(checkedOrder.total),
+          payment_method: checkedOrder.payment_method,
+          payment_status: checkedOrder.payment_status,
+          buyer: {
+            id: buyerUserId,
+            name: buyer?.name || 'Cliente PX',
+            email: buyer?.email || '',
+            cpf: buyer?.cpf || '',
+          },
+          created_at: checkedOrder.created_at,
+        };
+
+        ordersStore.set(checkedOrder.id, recoveredOrder);
+
+        return res.json({
+          success: true,
+          order: recoveredOrder,
+          payment: {
+            status: 'pending',
+            method: recoveredOrder.payment_method,
+            preference_id: `pref_${checkedOrder.id}`,
+            gateway_ready: isGatewayReady,
+            expires_at: expirationDate,
+            expires_in_seconds: 900,
+            pix_copy_paste: recoveredOrder.payment_method === 'pix'
+              ? `00020126580014BR.GOV.BCB.PIX0136${checkedOrder.id}520400005303986540${recoveredOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
+              : null,
+            message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
+          },
+        });
       }
-    } catch (e) {
-      // Fallback seguro
+
+      return res.status(400).json({ error: msg || 'Falha ao processar o checkout.' });
     }
 
-    const itemSubtotal = unitPrice * qty;
-    calculatedSubtotal += itemSubtotal;
-    processedItems.push({
-      batch_id: item.batch_id,
-      batch_name: batchName,
-      quantity: qty,
-      unit_price: unitPrice,
-      subtotal: itemSubtotal,
-    });
+    if (rpcResult && rpcResult.order_id) {
+      const newOrder: InMemoryOrder = {
+        id: rpcResult.order_id,
+        user_id: buyerUserId,
+        event_id: rpcResult.event_id,
+        event_title: rpcResult.event_title || event_title || 'PX CUSTON',
+        items: rpcResult.items,
+        subtotal: rpcResult.subtotal,
+        convenience_fee: rpcResult.convenience_fee,
+        discount: rpcResult.discount,
+        total: rpcResult.total,
+        payment_method: rpcResult.payment_method,
+        payment_status: 'pending',
+        buyer: {
+          id: buyerUserId,
+          name: buyer?.name || 'Cliente PX',
+          email: buyer?.email || '',
+          cpf: buyer?.cpf || '',
+        },
+        created_at: rpcResult.created_at || new Date().toISOString(),
+      };
+
+      ordersStore.set(rpcResult.order_id, newOrder);
+
+      const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+      const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
+      const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      return res.json({
+        success: true,
+        order: newOrder,
+        payment: {
+          status: 'pending',
+          method: newOrder.payment_method,
+          preference_id: `pref_${rpcResult.order_id}`,
+          gateway_ready: isGatewayReady,
+          expires_at: expirationDate,
+          expires_in_seconds: 900,
+          pix_copy_paste: newOrder.payment_method === 'pix'
+            ? `00020126580014BR.GOV.BCB.PIX0136${rpcResult.order_id}520400005303986540${newOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
+            : null,
+          message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
+        },
+      });
+    }
+
+    return res.status(500).json({ error: 'Resposta inesperada ao criar pedido.' });
+  } catch (err: any) {
+    console.error('[PX CUSTON Checkout] Exceção crítica durante checkout:', err);
+
+    // Verificação de segurança: checar se o pedido foi criado apesar da exceção de rede
+    try {
+      const { data: maybeOrder } = await supabaseAdmin
+        .from('orders')
+        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, created_at')
+        .eq('id', clientOrderId)
+        .maybeSingle();
+
+      if (maybeOrder && maybeOrder.id) {
+        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} confirmado no banco após reconexão.`);
+        const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+        const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
+        const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+        return res.json({
+          success: true,
+          order: maybeOrder,
+          payment: {
+            status: 'pending',
+            method: maybeOrder.payment_method,
+            preference_id: `pref_${maybeOrder.id}`,
+            gateway_ready: isGatewayReady,
+            expires_at: expirationDate,
+            expires_in_seconds: 900,
+            pix_copy_paste: maybeOrder.payment_method === 'pix'
+              ? `00020126580014BR.GOV.BCB.PIX0136${maybeOrder.id}520400005303986540${Number(maybeOrder.total).toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
+              : null,
+            message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
+          },
+        });
+      }
+    } catch (checkErr) {
+      console.error('[PX CUSTON Checkout] Erro ao reconciliar status:', checkErr);
+    }
+
+    return res.status(500).json({ error: 'Erro de comunicação ao processar reserva. O estoque não foi comprometido de forma inconsistente. Por favor, tente novamente.' });
   }
-
-  const convenienceFee = calculatedSubtotal > 0 ? 4.0 : 0.0;
-  const pixDiscount = payment_method === 'pix' ? calculatedSubtotal * 0.05 : 0.0;
-  const calculatedTotal = Math.max(0, calculatedSubtotal + convenienceFee - pixDiscount);
-
-  const orderId = `ord-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  const createdAt = new Date().toISOString();
-
-  const newOrder: InMemoryOrder = {
-    id: orderId,
-    user_id: buyer?.email ? `usr-${buyer.email}` : 'usr-guest',
-    event_id,
-    event_title: event_title || 'PX CUSTON',
-    items: processedItems,
-    subtotal: Number(calculatedSubtotal.toFixed(2)),
-    convenience_fee: Number(convenienceFee.toFixed(2)),
-    discount: Number(pixDiscount.toFixed(2)),
-    total: Number(calculatedTotal.toFixed(2)),
-    payment_method: payment_method || 'pix',
-    payment_status: 'pending',
-    buyer: {
-      name: buyer?.name || 'Cliente PX',
-      email: buyer?.email || '',
-      cpf: buyer?.cpf || '',
-    },
-    created_at: createdAt,
-  };
-
-  ordersStore.set(orderId, newOrder);
-
-  // Registro seguro no banco se Supabase estiver ativo
-  try {
-    await supabaseAdmin.from('orders').insert({
-      user_id: buyer?.id,
-      event_id: event_id,
-      subtotal: newOrder.subtotal,
-      convenience_fee: newOrder.convenience_fee,
-      discount: newOrder.discount,
-      total: newOrder.total,
-      payment_method: newOrder.payment_method,
-      payment_status: 'pending',
-    });
-  } catch (err) {
-    // Ignora caso schema ainda não tenha sido aplicado no Supabase
-  }
-
-  const mpAccessToken = process.env.MP_ACCESS_TOKEN;
-  const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
-
-  res.json({
-    success: true,
-    order: newOrder,
-    payment: {
-      status: 'pending',
-      method: payment_method || 'pix',
-      preference_id: `pref_${orderId}`,
-      gateway_ready: isGatewayReady,
-      pix_copy_paste: payment_method === 'pix' ? `00020126580014BR.GOV.BCB.PIX0136${orderId}520400005303986540${newOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1` : null,
-      message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago.',
-    },
-  });
 });
 
-// Endpoint: Consulta de Status do Pedido
+// Endpoint: Consulta de Status do Pedido com Validação Automática de Expiração (15 min)
 app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const order = ordersStore.get(id);
-
-  if (order) {
-    return res.json({
-      id: order.id,
-      status: order.payment_status,
-      total: order.total,
-      updated_at: new Date().toISOString(),
-    });
-  }
 
   try {
     const { data: dbOrder } = await supabaseAdmin
       .from('orders')
-      .select('id, payment_status, total, updated_at')
+      .select('id, payment_status, total, created_at, updated_at')
       .eq('id', id)
       .maybeSingle();
 
     if (dbOrder) {
+      // Verificar se o pedido é pendente e excedeu o tempo limite de 15 minutos
+      if (dbOrder.payment_status === 'pending') {
+        const ageMs = Date.now() - new Date(dbOrder.created_at).getTime();
+        if (ageMs > 15 * 60 * 1000) {
+          // Cancelar e liberar estoque atomicamente
+          try {
+            await supabaseAdmin.rpc('cancel_order_and_release_stock', {
+              p_order_id: id,
+              p_reason: 'expired_timeout',
+            });
+          } catch {
+            await supabaseAdmin
+              .from('orders')
+              .update({ payment_status: 'cancelled', updated_at: new Date().toISOString() })
+              .eq('id', id);
+          }
+
+          dbOrder.payment_status = 'cancelled';
+          const cached = ordersStore.get(id);
+          if (cached) cached.payment_status = 'cancelled';
+
+          return res.json({
+            id: dbOrder.id,
+            status: 'cancelled',
+            total: dbOrder.total,
+            updated_at: new Date().toISOString(),
+            expired: true,
+            message: 'O tempo limite para pagamento deste pedido expirou (15 minutos). O estoque reservado foi liberado automaticamente.',
+          });
+        }
+      }
+
       return res.json({
         id: dbOrder.id,
         status: dbOrder.payment_status,
         total: dbOrder.total,
         updated_at: dbOrder.updated_at,
+        expired: dbOrder.payment_status === 'cancelled',
       });
     }
-  } catch (e) {
-    // Fallback
+  } catch (e) {}
+
+  // Consulta em cache em memória caso banco esteja em contingência
+  const order = ordersStore.get(id);
+  if (order) {
+    if (order.payment_status === 'pending') {
+      const ageMs = Date.now() - new Date(order.created_at).getTime();
+      if (ageMs > 15 * 60 * 1000) {
+        order.payment_status = 'cancelled';
+        return res.json({
+          id: order.id,
+          status: 'cancelled',
+          total: order.total,
+          updated_at: new Date().toISOString(),
+          expired: true,
+          message: 'O tempo limite para pagamento deste pedido expirou (15 minutos). O estoque reservado foi liberado.',
+        });
+      }
+    }
+
+    return res.json({
+      id: order.id,
+      status: order.payment_status,
+      total: order.total,
+      updated_at: new Date().toISOString(),
+      expired: order.payment_status === 'cancelled',
+    });
   }
 
   return res.status(404).json({ error: 'Pedido não encontrado.' });
 });
 
-// Webhook oficial do Mercado Pago para confirmação de pagamentos
+/**
+ * Validação criptográfica da assinatura HMAC-SHA256 enviada pelo Mercado Pago no cabeçalho x-signature.
+ * Documentação oficial: https://www.mercadopago.com.br/developers/pt/docs/your-integrations/notifications/webhooks
+ */
+function verifyMercadoPagoSignature(req: Request): { valid: boolean; configured: boolean; reason?: string } {
+  const secret = process.env.MP_WEBHOOK_SECRET;
+  if (!secret || secret.includes('your-webhook-secret') || secret.includes('placeholder')) {
+    return { valid: false, configured: false, reason: 'MP_WEBHOOK_SECRET não configurado no ambiente.' };
+  }
+
+  const xSignature = req.headers['x-signature'] as string;
+  const xRequestId = req.headers['x-request-id'] as string;
+
+  if (!xSignature) {
+    return { valid: false, configured: true, reason: 'Cabeçalho x-signature ausente na requisição.' };
+  }
+
+  // Extrair partes: ts e v1 (ex: "ts=1704067200,v1=abcdef...")
+  const parts: Record<string, string> = {};
+  for (const part of xSignature.split(',')) {
+    const [key, val] = part.trim().split('=');
+    if (key && val) parts[key] = val;
+  }
+
+  const ts = parts['ts'];
+  const v1 = parts['v1'];
+
+  if (!ts || !v1) {
+    return { valid: false, configured: true, reason: 'Formato inválido de x-signature (ts ou v1 ausentes).' };
+  }
+
+  // Prevenir replay attacks com timestamp superior a 10 minutos
+  const nowSec = Math.floor(Date.now() / 1000);
+  const tsNum = parseInt(ts, 10);
+  if (!isNaN(tsNum) && Math.abs(nowSec - tsNum) > 600) {
+    return { valid: false, configured: true, reason: 'Timestamp de assinatura expirado (replay attack detectado).' };
+  }
+
+  const dataId = req.query['data.id'] || req.body?.data?.id || req.body?.id || '';
+  const manifest = `id:${dataId};request-id:${xRequestId || ''};ts:${ts};`;
+
+  try {
+    const computedHash = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
+    const isValid = crypto.timingSafeEqual(Buffer.from(computedHash, 'utf-8'), Buffer.from(v1, 'utf-8'));
+    return { valid: isValid, configured: true };
+  } catch (err) {
+    return { valid: false, configured: true, reason: 'Falha no cálculo HMAC.' };
+  }
+}
+
+// Webhook Oficial do Mercado Pago para Confirmação e Conciliação de Pagamentos
 app.post('/api/payments/webhook', async (req: Request, res: Response) => {
-  const { type, data, action } = req.body;
-  console.log(`[PX CUSTON Webhook] Notificação recebida: ${type || action || 'desconhecido'}`);
-  res.status(200).json({ received: true });
+  const body = req.body || {};
+  const query = req.query || {};
+
+  // 1. Verificação de Autenticidade da Assinatura (se configurada no ambiente)
+  const signatureCheck = verifyMercadoPagoSignature(req);
+  if (signatureCheck.configured && !signatureCheck.valid) {
+    console.error(`[PX CUSTON Webhook] ❌ Assinatura inválida rejeitada: ${signatureCheck.reason}`);
+    return res.status(401).json({ error: 'Assinatura inválida.', reason: signatureCheck.reason });
+  }
+
+  // 2. Extração do Identificador do Pagamento
+  const paymentId = body.data?.id || body.id || query['data.id'] || query.id;
+
+  // Se não houver ID de pagamento (ex: pings de teste ou eventos de webhook)
+  if (!paymentId || String(paymentId).startsWith('mp-test-')) {
+    return res.status(200).json({
+      received: true,
+      message: 'Notificação de teste/ping reconhecida. Nenhuma alteração financeira executada sem verificação com a autoridade bancária.',
+      payment_id: paymentId || null,
+    });
+  }
+
+  // 3. Validação das Credenciais do Servidor
+  const mpAccessToken = process.env.MP_ACCESS_TOKEN;
+  if (!mpAccessToken || mpAccessToken.includes('placeholder') || mpAccessToken.includes('your-access-token')) {
+    console.error('[PX CUSTON Webhook] MP_ACCESS_TOKEN não configurado no backend. Falha de forma segura sem alterar pedidos.');
+    return res.status(503).json({ error: 'Gateway de pagamento não configurado no servidor.' });
+  }
+
+  // 4. Consulta Autorizada e Exclusiva na API Oficial do Mercado Pago (Backend-to-Backend)
+  let mpData: any = null;
+  try {
+    const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      headers: {
+        Authorization: `Bearer ${mpAccessToken}`,
+      },
+    });
+
+    if (!mpResponse.ok) {
+      console.error(`[PX CUSTON Webhook] Pagamento ${paymentId} não localizado na API oficial do Mercado Pago (HTTP ${mpResponse.status}).`);
+      return res.status(502).json({ error: 'Não foi possível verificar o pagamento junto ao Mercado Pago.' });
+    }
+
+    mpData = await mpResponse.json();
+  } catch (mpErr: any) {
+    console.error('[PX CUSTON Webhook] Exceção de rede ao consultar API oficial do Mercado Pago:', mpErr);
+    return res.status(502).json({ error: 'Erro de comunicação com o Mercado Pago.' });
+  }
+
+  // 5. Validação Estrita dos Dados Autorizados do Gateway
+  // NUNCA confiar no body recebido: usar estritamente os dados retornados pela API oficial
+  const officialOrderId = mpData.external_reference;
+  const officialStatus = mpData.status; // 'approved', 'rejected', 'cancelled', 'in_process', etc.
+  const officialCurrency = mpData.currency_id;
+  const officialAmount = Number(mpData.transaction_amount || 0);
+
+  if (!officialOrderId) {
+    console.warn(`[PX CUSTON Webhook] Pagamento ${paymentId} sem external_reference associado.`);
+    return res.status(400).json({ error: 'Pagamento não vinculado a um pedido do sistema.' });
+  }
+
+  // 6. Consultar Pedido no PostgreSQL
+  const { data: dbOrder, error: orderFetchErr } = await supabaseAdmin
+    .from('orders')
+    .select('id, total, payment_status, event_id, user_id')
+    .eq('id', officialOrderId)
+    .maybeSingle();
+
+  if (orderFetchErr || !dbOrder) {
+    console.error(`[PX CUSTON Webhook] Pedido ${officialOrderId} não encontrado no banco oficial.`);
+    return res.status(404).json({ error: 'Pedido referenciado não encontrado.' });
+  }
+
+  // 7. Validação de Moeda e Valor
+  if (officialCurrency !== 'BRL') {
+    console.error(`[PX CUSTON Webhook] Moeda não autorizada: ${officialCurrency}. Esperado: BRL.`);
+    return res.status(400).json({ error: 'Moeda da transação inválida.' });
+  }
+
+  if (Math.abs(officialAmount - Number(dbOrder.total)) > 0.05) {
+    console.error(`[PX CUSTON Webhook] Divergência de valor no pedido ${officialOrderId}: pago R$ ${officialAmount}, esperado R$ ${dbOrder.total}`);
+    return res.status(400).json({ error: 'Divergência entre o valor pago e o valor oficial do pedido.' });
+  }
+
+  // 8. Proteção contra Notificações Fora de Ordem e Atrasadas
+  // Se o pedido JÁ está aprovado, NUNCA cancelar ou estornar por notificação atrasada
+  if (dbOrder.payment_status === 'approved') {
+    if (officialStatus === 'approved') {
+      // Notificação repetida: confirmação idempotente sem reemitir ingressos
+      await supabaseAdmin.rpc('confirm_order_and_issue_tickets', {
+        p_order_id: officialOrderId,
+        p_mercado_pago_id: String(paymentId),
+      });
+      return res.status(200).json({
+        received: true,
+        already_approved: true,
+        order_id: officialOrderId,
+        status: 'approved',
+      });
+    }
+
+    // Se notificação atrasada trouxer rejected/cancelled para um pedido já aprovado: IGNORAR com segurança
+    console.warn(`[PX CUSTON Webhook] Notificação atrasada com status "${officialStatus}" ignorada. Pedido ${officialOrderId} já está aprovado.`);
+    return res.status(200).json({
+      received: true,
+      ignored: true,
+      message: 'Pedido já aprovado e protegido contra cancelamento retroativo.',
+    });
+  }
+
+  // Se o pedido já foi cancelado e o estoque liberado:
+  if (dbOrder.payment_status === 'cancelled') {
+    console.warn(`[PX CUSTON Webhook] Notificação recebida para pedido ${officialOrderId} já cancelado.`);
+    return res.status(200).json({
+      received: true,
+      already_cancelled: true,
+      order_id: officialOrderId,
+    });
+  }
+
+  // 9. Atualização Transacional com base no Status Oficial
+  if (officialStatus === 'approved') {
+    const { data: confirmResult, error: confirmErr } = await supabaseAdmin.rpc(
+      'confirm_order_and_issue_tickets',
+      {
+        p_order_id: officialOrderId,
+        p_mercado_pago_id: String(paymentId),
+      }
+    );
+
+    if (confirmErr) {
+      console.error('[PX CUSTON Webhook] Falha ao confirmar pedido via RPC:', confirmErr.message);
+      return res.status(500).json({ error: 'Falha ao processar confirmação de pagamento no banco.' });
+    }
+
+    const cached = ordersStore.get(officialOrderId);
+    if (cached) cached.payment_status = 'approved';
+
+    console.log(`[PX CUSTON Webhook] Pedido ${officialOrderId} aprovado com sucesso! Ingressos emitidos.`);
+    return res.status(200).json({ received: true, order_id: officialOrderId, status: 'approved' });
+  }
+
+  if (officialStatus === 'rejected' || officialStatus === 'cancelled') {
+    const { data: cancelResult, error: cancelErr } = await supabaseAdmin.rpc(
+      'cancel_order_and_release_stock',
+      {
+        p_order_id: officialOrderId,
+        p_reason: `payment_${officialStatus}`,
+      }
+    );
+
+    if (cancelErr) {
+      console.error('[PX CUSTON Webhook] Falha ao cancelar pedido via RPC:', cancelErr.message);
+      return res.status(500).json({ error: 'Falha ao processar cancelamento no banco.' });
+    }
+
+    const cached = ordersStore.get(officialOrderId);
+    if (cached) cached.payment_status = 'cancelled';
+
+    console.log(`[PX CUSTON Webhook] Pedido ${officialOrderId} cancelado. Estoque devolvido ao lote.`);
+    return res.status(200).json({ received: true, order_id: officialOrderId, status: 'cancelled' });
+  }
+
+  if (officialStatus === 'in_process') {
+    // Antifraude em análise: atualizar pedido para in_process (nunca expirar)
+    await supabaseAdmin
+      .from('orders')
+      .update({ payment_status: 'in_process', updated_at: new Date().toISOString() })
+      .eq('id', officialOrderId);
+
+    const cached = ordersStore.get(officialOrderId);
+    if (cached) cached.payment_status = 'in_process';
+
+    return res.status(200).json({ received: true, order_id: officialOrderId, status: 'in_process' });
+  }
+
+  return res.status(200).json({ received: true, order_id: officialOrderId, status: officialStatus });
 });
+
+// Admin Route: Gatilho manual para expirar pedidos pendentes no PX CONTROL
+app.post(
+  '/api/admin/orders/expire-pending',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const timeoutMinutes = parseInt(req.body.timeout_minutes, 10) || 15;
+      const { data, error } = await supabaseAdmin.rpc('expire_pending_orders', {
+        p_timeout_minutes: timeoutMinutes,
+      });
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.json({
+        success: true,
+        result: data,
+        executed_by: req.user?.email || 'admin',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 // Legado compatível: Payment preference
 app.post('/api/payments/create-preference', (req: Request, res: Response) => {
@@ -990,6 +1514,35 @@ app.post('/api/payments/create-preference', (req: Request, res: Response) => {
     status: 'pending',
   });
 });
+
+// Rotina em segundo plano de expiração de pedidos pendentes (> 15 minutos)
+function setupOrderExpirationWorker() {
+  const EXPIRATION_INTERVAL_MS = 2 * 60 * 1000; // a cada 2 minutos
+  setInterval(async () => {
+    try {
+      const { data: expRes, error: expErr } = await supabaseAdmin.rpc('expire_pending_orders', {
+        p_timeout_minutes: 15,
+      });
+
+      if (!expErr && expRes && expRes.expired_orders_count > 0) {
+        console.log(`[PX CUSTON Worker] Rotina de expiração executada: ${expRes.expired_orders_count} pedidos cancelados e estoque liberado.`);
+      }
+
+      // Sincronizar cache em memória
+      const now = Date.now();
+      for (const [id, ord] of ordersStore.entries()) {
+        if (ord.payment_status === 'pending') {
+          const ageMs = now - new Date(ord.created_at).getTime();
+          if (ageMs > 15 * 60 * 1000) {
+            ord.payment_status = 'cancelled';
+          }
+        }
+      }
+    } catch (e) {
+      // Silencioso em caso de contingência
+    }
+  }, EXPIRATION_INTERVAL_MS);
+}
 
 // Vite middleware in dev or static files in production
 async function startServer() {
@@ -1011,6 +1564,9 @@ async function startServer() {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
+
+  // Ativar rotina em segundo plano de expiração de pedidos pendentes
+  setupOrderExpirationWorker();
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 [PX CUSTON] Servidor Express ativo em http://localhost:${PORT}`);

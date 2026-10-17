@@ -42,6 +42,32 @@ export interface TicketBatch {
   total_quantity: number;
   available_quantity: number;
   is_active: boolean;
+  start_date?: string | null;
+  end_date?: string | null;
+  created_at?: string;
+}
+
+export interface CreateTicketBatchInput {
+  event_id: string;
+  name: string;
+  description?: string;
+  price: number;
+  total_quantity: number;
+  available_quantity?: number;
+  is_active?: boolean;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface UpdateTicketBatchInput {
+  name?: string;
+  description?: string;
+  price?: number;
+  total_quantity?: number;
+  available_quantity?: number;
+  is_active?: boolean;
+  start_date?: string | null;
+  end_date?: string | null;
 }
 
 export interface EventItem {

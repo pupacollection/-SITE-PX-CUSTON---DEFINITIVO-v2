@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { EventItem, TicketBatch, PaymentMethod, Ticket, UserProfile, ActiveScreen } from '../types';
+import { ordersService } from '../services/ordersService';
 import {
   CreditCard,
   QrCode,
@@ -11,6 +12,8 @@ import {
   ArrowLeft,
   Sparkles,
   AlertCircle,
+  Clock,
+  RefreshCw,
 } from 'lucide-react';
 
 interface CheckoutViewProps {
@@ -38,6 +41,9 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const [registeredOrder, setRegisteredOrder] = useState<any | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [copiedPix, setCopiedPix] = useState(false);
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(900);
+  const [isOrderExpired, setIsOrderExpired] = useState(false);
+  const [orderPaymentStatus, setOrderPaymentStatus] = useState<'pending' | 'approved' | 'cancelled'>('pending');
 
   // Compute totals
   const subtotal = selectedBatches.reduce(
@@ -47,6 +53,52 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   const convenienceFee = subtotal > 0 ? 4.0 : 0;
   const pixDiscount = selectedMethod === 'pix' ? subtotal * 0.05 : 0;
   const total = Math.max(0, subtotal + convenienceFee - pixDiscount);
+
+  // Efeito de contagem regressiva e polling do status do pedido registrado
+  useEffect(() => {
+    if (!registeredOrder?.order?.id || orderPaymentStatus !== 'pending') return;
+
+    // Calcular segundos restantes com base na data de expiração oficial retornada pelo backend
+    const expiresAt = registeredOrder.payment?.expires_at
+      ? new Date(registeredOrder.payment.expires_at).getTime()
+      : Date.now() + 15 * 60 * 1000;
+
+    const timerInterval = setInterval(() => {
+      const now = Date.now();
+      const diffSecs = Math.max(0, Math.floor((expiresAt - now) / 1000));
+      setSecondsRemaining(diffSecs);
+
+      if (diffSecs <= 0) {
+        setIsOrderExpired(true);
+        setOrderPaymentStatus('cancelled');
+        clearInterval(timerInterval);
+      }
+    }, 1000);
+
+    // Polling a cada 5 segundos para verificar confirmação ou cancelamento pelo gateway
+    const pollingInterval = setInterval(async () => {
+      try {
+        const statusRes = await ordersService.getOrderStatus(registeredOrder.order.id);
+        if (statusRes.status === 'approved') {
+          setOrderPaymentStatus('approved');
+          clearInterval(pollingInterval);
+          clearInterval(timerInterval);
+        } else if (statusRes.status === 'cancelled' || statusRes.expired) {
+          setIsOrderExpired(true);
+          setOrderPaymentStatus('cancelled');
+          clearInterval(pollingInterval);
+          clearInterval(timerInterval);
+        }
+      } catch (pollErr) {
+        // Tolerante a falhas pontuais de conexão
+      }
+    }, 5000);
+
+    return () => {
+      clearInterval(timerInterval);
+      clearInterval(pollingInterval);
+    };
+  }, [registeredOrder, orderPaymentStatus]);
 
   const handleCheckout = async () => {
     setOrderError(null);
@@ -62,44 +114,42 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
     setProcessing(true);
 
     try {
-      // 2. Registro oficial do pedido no backend com cálculo autoritativo
-      const response = await fetch('/api/orders/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      // 2. Registro oficial do pedido no backend com cálculo autoritativo e reserva atômica de estoque
+      const data = await ordersService.createOrder({
+        event_id: event.id,
+        event_title: event.title,
+        items: selectedBatches.map((item) => ({
+          batch_id: item.batch.id,
+          batch_name: item.batch.name,
+          unit_price: item.batch.price,
+          quantity: item.quantity,
+        })),
+        buyer: {
+          id: user?.id,
+          name: buyerName,
+          email: buyerEmail,
+          cpf: buyerCpf,
         },
-        body: JSON.stringify({
-          event_id: event.id,
-          event_title: event.title,
-          items: selectedBatches.map((item) => ({
-            batch_id: item.batch.id,
-            batch_name: item.batch.name,
-            unit_price: item.batch.price,
-            quantity: item.quantity,
-          })),
-          buyer: {
-            name: buyerName,
-            email: buyerEmail,
-            cpf: buyerCpf,
-          },
-          payment_method: selectedMethod,
-        }),
+        payment_method: selectedMethod,
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Falha ao registrar pedido no servidor.');
-      }
 
       // O pedido é registrado como PENDENTE. O frontend NUNCA emite ingressos pagos diretamente.
       setRegisteredOrder(data);
+      setOrderPaymentStatus('pending');
+      setIsOrderExpired(false);
+      setSecondsRemaining(data.payment?.expires_in_seconds || 900);
     } catch (err: any) {
       console.error('Erro ao processar pedido:', err);
       setOrderError(err.message || 'Erro de conexão ao processar pedido.');
     } finally {
       setProcessing(false);
     }
+  };
+
+  const formatCountdown = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const rem = secs % 60;
+    return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
   };
 
   return (
@@ -181,24 +231,67 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           </div>
         )}
 
-        {/* TELA DE PEDIDO REGISTRADO (STATUS PENDENTE) */}
+        {/* TELA DE PEDIDO REGISTRADO (STATUS PENDENTE OU CONCLUÍDO) */}
         {registeredOrder ? (
           <div className="bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8 space-y-6 max-w-2xl mx-auto">
             <div className="text-center space-y-2">
-              <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center mx-auto">
-                <CheckCircle2 className="w-6 h-6" />
+              <div className={`w-12 h-12 rounded-full flex items-center justify-center mx-auto border ${
+                orderPaymentStatus === 'approved'
+                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                  : isOrderExpired || orderPaymentStatus === 'cancelled'
+                  ? 'bg-red-500/20 text-[#FF1A2D] border-[#FF1A2D]/40'
+                  : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+              }`}>
+                {orderPaymentStatus === 'approved' ? (
+                  <CheckCircle2 className="w-6 h-6" />
+                ) : isOrderExpired || orderPaymentStatus === 'cancelled' ? (
+                  <AlertCircle className="w-6 h-6" />
+                ) : (
+                  <Clock className="w-6 h-6 animate-pulse" />
+                )}
               </div>
+
               <h2 className="text-xl font-black uppercase text-white font-heading">
-                Pedido Registrado com Sucesso!
+                {orderPaymentStatus === 'approved'
+                  ? 'Pagamento Confirmado!'
+                  : isOrderExpired || orderPaymentStatus === 'cancelled'
+                  ? 'Tempo Limite Expirado'
+                  : 'Pedido Registrado com Sucesso!'}
               </h2>
               <p className="text-xs text-zinc-400">
                 Código do Pedido: <span className="font-mono text-white font-bold">{registeredOrder.order?.id}</span>
               </p>
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 border border-amber-500/30 rounded-full text-amber-300 text-xs font-semibold">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
-                <span>Aguardando Confirmação do Pagamento</span>
-              </div>
+
+              {orderPaymentStatus === 'approved' ? (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-300 text-xs font-semibold">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Ingressos emitidos oficialmente com validação QR Code</span>
+                </div>
+              ) : isOrderExpired || orderPaymentStatus === 'cancelled' ? (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 bg-red-500/20 border border-[#FF1A2D]/40 rounded-full text-red-300 text-xs font-semibold">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  <span>Pedido Cancelado — Estoque liberado automaticamente</span>
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-amber-500/10 border border-amber-500/30 rounded-full text-amber-300 text-xs font-semibold">
+                  <Clock className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  <span>Aguardando Pagamento — Expira em: <strong className="font-mono text-white">{formatCountdown(secondsRemaining)}</strong></span>
+                </div>
+              )}
             </div>
+
+            {/* Banner de Aviso de Expiração caso cancelado */}
+            {(isOrderExpired || orderPaymentStatus === 'cancelled') && (
+              <div className="bg-red-950/30 border border-[#FF1A2D]/30 p-4 rounded-2xl flex items-start gap-3 text-xs text-zinc-300">
+                <AlertCircle className="w-5 h-5 text-[#FF1A2D] shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold text-white uppercase tracking-wider">Prazo de Pagamento Encerrado</p>
+                  <p className="text-zinc-400">
+                    O tempo de reserva temporária de 15 minutos foi atingido. Para evitar indisponibilidade injusta, os ingressos deste pedido retornaram automaticamente ao estoque do evento.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Detalhes do Pagamento */}
             <div className="bg-[#181818] border border-[#262626] rounded-2xl p-5 space-y-4">
@@ -217,11 +310,18 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 <span className="font-bold uppercase text-white">{registeredOrder.order?.payment_method}</span>
               </div>
 
-              {registeredOrder.payment?.pix_copy_paste && (
+              {/* Seção Pix Copia e Cola (Apenas se pendente e não expirado) */}
+              {orderPaymentStatus === 'pending' && !isOrderExpired && registeredOrder.payment?.pix_copy_paste && (
                 <div className="pt-2 space-y-2">
-                  <label className="text-[10px] text-zinc-400 uppercase font-semibold block">
-                    Código Pix Copia e Cola
-                  </label>
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] text-zinc-400 uppercase font-semibold">
+                      Código Pix Copia e Cola (Mercado Pago)
+                    </label>
+                    <span className="text-[10px] font-mono text-amber-400 flex items-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      Expira em {formatCountdown(secondsRemaining)}
+                    </span>
+                  </div>
                   <div className="flex gap-2">
                     <input
                       type="text"
@@ -249,26 +349,52 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl flex items-start gap-3 text-xs text-zinc-400">
               <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
               <div>
-                <span className="font-semibold text-zinc-200 block mb-0.5">Liberação Autoritativa de Ingressos</span>
+                <span className="font-semibold text-zinc-200 block mb-0.5">Garantia Transacional & Anti-Duplicação</span>
                 <span>
-                  O ingresso oficial e o QR Code de validação serão emitidos no sistema após a confirmação automática enviada pelo Mercado Pago. Você poderá consultar seus ingressos a qualquer momento na sua conta.
+                  {orderPaymentStatus === 'approved'
+                    ? 'Seus ingressos digitais foram gerados com código seguro único e QR payload oficial para o terminal PX CONTROL Check-in.'
+                    : 'O estoque permanece garantido durante a contagem de 15 minutos. Após a compensação confirmada pelo Mercado Pago via webhook, os ingressos serão emitidos automaticamente.'}
                 </span>
               </div>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3 pt-2">
-              <button
-                onClick={() => onNavigate('profile')}
-                className="flex-1 bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider py-3 rounded-xl transition text-center"
-              >
-                Acompanhar no Meu Perfil
-              </button>
-              <button
-                onClick={() => onNavigate('events')}
-                className="flex-1 bg-[#181818] border border-[#2a2a2a] hover:bg-[#222] text-zinc-300 text-xs font-semibold py-3 rounded-xl transition text-center"
-              >
-                Voltar aos Eventos
-              </button>
+              {isOrderExpired || orderPaymentStatus === 'cancelled' ? (
+                <>
+                  <button
+                    onClick={() => {
+                      setRegisteredOrder(null);
+                      setIsOrderExpired(false);
+                      setOrderPaymentStatus('pending');
+                    }}
+                    className="flex-1 bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider py-3 rounded-xl transition text-center flex items-center justify-center gap-2"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Tentar Novamente</span>
+                  </button>
+                  <button
+                    onClick={() => onNavigate('events')}
+                    className="flex-1 bg-[#181818] border border-[#2a2a2a] hover:bg-[#222] text-zinc-300 text-xs font-semibold py-3 rounded-xl transition text-center"
+                  >
+                    Voltar aos Eventos
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => onNavigate('profile')}
+                    className="flex-1 bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider py-3 rounded-xl transition text-center"
+                  >
+                    {orderPaymentStatus === 'approved' ? 'Visualizar Meus Ingressos' : 'Acompanhar no Meu Perfil'}
+                  </button>
+                  <button
+                    onClick={() => onNavigate('events')}
+                    className="flex-1 bg-[#181818] border border-[#2a2a2a] hover:bg-[#222] text-zinc-300 text-xs font-semibold py-3 rounded-xl transition text-center"
+                  >
+                    Voltar aos Eventos
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ) : (

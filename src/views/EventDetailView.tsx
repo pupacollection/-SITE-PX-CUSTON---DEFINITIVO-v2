@@ -28,14 +28,20 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
   onProceedToCheckout,
   onNavigate,
 }) => {
-  const [quantities, setQuantities] = useState<Record<string, number>>({
-    [event.ticket_batches[0]?.id || '']: 2, // default 2 tickets for quick checkout
-  });
+  const initialBatch = event.ticket_batches.find((b) => b.is_active && b.available_quantity > 0);
+  const [quantities, setQuantities] = useState<Record<string, number>>(
+    initialBatch ? { [initialBatch.id]: 1 } : {}
+  );
 
   const updateQuantity = (batchId: string, delta: number) => {
+    const targetBatch = event.ticket_batches.find((b) => b.id === batchId);
+    if (targetBatch && (!targetBatch.is_active || targetBatch.available_quantity <= 0)) {
+      return;
+    }
+    const maxAllowed = targetBatch ? Math.min(10, targetBatch.available_quantity) : 10;
     setQuantities((prev) => {
       const current = prev[batchId] || 0;
-      const next = Math.max(0, Math.min(10, current + delta));
+      const next = Math.max(0, Math.min(maxAllowed, current + delta));
       return { ...prev, [batchId]: next };
     });
   };
@@ -43,18 +49,24 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
   const totalSelected = Object.values(quantities).reduce((acc, q) => acc + q, 0);
 
   const handleBuy = (targetBatch?: TicketBatch) => {
+    if (targetBatch && (!targetBatch.is_active || targetBatch.available_quantity <= 0)) {
+      return;
+    }
     const selectedBatches = event.ticket_batches
+      .filter((b) => b.is_active && b.available_quantity > 0)
       .map((batch) => ({
         batch,
         quantity: targetBatch?.id === batch.id ? Math.max(1, quantities[batch.id] || 1) : (quantities[batch.id] || 0),
       }))
       .filter((item) => item.quantity > 0);
 
-    if (selectedBatches.length === 0 && targetBatch) {
+    if (selectedBatches.length === 0 && targetBatch && targetBatch.is_active && targetBatch.available_quantity > 0) {
       selectedBatches.push({ batch: targetBatch, quantity: 1 });
     }
 
-    onProceedToCheckout(event, selectedBatches);
+    if (selectedBatches.length > 0) {
+      onProceedToCheckout(event, selectedBatches);
+    }
   };
 
   return (
@@ -214,28 +226,58 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
           <div className="space-y-4">
             {event.ticket_batches.map((batch) => {
               const qty = quantities[batch.id] || 0;
+              const now = new Date();
+              const isUpcoming = batch.start_date ? new Date(batch.start_date) > now : false;
+              const isExpired = batch.end_date ? new Date(batch.end_date) < now : false;
+              const isSoldOut = batch.available_quantity <= 0;
+              const isUnavailable = !batch.is_active || isSoldOut || isUpcoming || isExpired;
+
               return (
                 <div
                   key={batch.id}
-                  className="bg-[#181818] border border-[#262626] hover:border-[#383838] p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-5 transition"
+                  className={`bg-[#181818] border p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-5 transition ${
+                    isUnavailable
+                      ? 'border-[#222] opacity-60'
+                      : 'border-[#262626] hover:border-[#383838]'
+                  }`}
                 >
                   <div className="max-w-md">
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-black uppercase text-white tracking-wide">
                         {batch.name}
                       </h3>
-                      <span className="text-[10px] text-zinc-400 bg-[#111] px-2 py-0.5 rounded border border-[#222]">
-                        {batch.available_quantity} restantes
-                      </span>
+                      {isSoldOut ? (
+                        <span className="text-[10px] text-red-400 bg-red-950/60 px-2 py-0.5 rounded border border-red-500/30 font-bold uppercase">
+                          Esgotado
+                        </span>
+                      ) : !batch.is_active ? (
+                        <span className="text-[10px] text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-700 font-bold uppercase">
+                          Indisponível
+                        </span>
+                      ) : isUpcoming ? (
+                        <span className="text-[10px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-500/30 font-bold uppercase">
+                          Em Breve
+                        </span>
+                      ) : isExpired ? (
+                        <span className="text-[10px] text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-700 font-bold uppercase">
+                          Vendas Encerradas
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-zinc-400 bg-[#111] px-2 py-0.5 rounded border border-[#222]">
+                          {batch.available_quantity} restantes
+                        </span>
+                      )}
                     </div>
-                    <p className="text-xs text-zinc-400 mt-1">{batch.description}</p>
+                    {batch.description && (
+                      <p className="text-xs text-zinc-400 mt-1">{batch.description}</p>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between sm:justify-end gap-6">
                     <div className="text-left sm:text-right">
                       <span className="text-[10px] text-zinc-400 block uppercase">Valor Unitário</span>
                       <span className="text-lg font-black text-[#FF1A2D]">
-                        R$ {batch.price.toFixed(2).replace('.', ',')}
+                        R$ {Number(batch.price).toFixed(2).replace('.', ',')}
                       </span>
                     </div>
 
@@ -243,16 +285,18 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
                     <div className="flex items-center bg-[#121212] border border-[#2a2a2a] rounded-xl p-1">
                       <button
                         onClick={() => updateQuantity(batch.id, -1)}
-                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] text-zinc-300 flex items-center justify-center transition"
+                        disabled={isUnavailable}
+                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
                       >
                         <Minus className="w-3.5 h-3.5" />
                       </button>
                       <span className="w-10 text-center font-bold text-xs text-white">
-                        {qty}
+                        {isUnavailable ? 0 : qty}
                       </span>
                       <button
                         onClick={() => updateQuantity(batch.id, 1)}
-                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] text-zinc-300 flex items-center justify-center transition"
+                        disabled={isUnavailable || qty >= batch.available_quantity}
+                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
                       >
                         <Plus className="w-3.5 h-3.5" />
                       </button>
@@ -260,9 +304,10 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
 
                     <button
                       onClick={() => handleBuy(batch)}
-                      className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition shrink-0"
+                      disabled={isUnavailable}
+                      className="bg-[#FF1A2D] hover:bg-[#e00f21] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition shrink-0"
                     >
-                      Comprar
+                      {isSoldOut ? 'Esgotado' : isUnavailable ? 'Indisponível' : 'Comprar'}
                     </button>
                   </div>
                 </div>
