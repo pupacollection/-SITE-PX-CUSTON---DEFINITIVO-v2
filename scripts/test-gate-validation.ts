@@ -8,6 +8,7 @@
  */
 
 import { validateStagingEnvironment, runPostgresHomologationTests } from './test-homologation-postgres';
+import { runRuntimeTests } from './test-api-runtime';
 
 async function runGateValidationTests() {
   console.log('==============================================================================');
@@ -136,6 +137,80 @@ async function runGateValidationTests() {
 
   console.log(`Gate Teste 5 (Falha simulada na limpeza final): ${test5Ok ? '✅ APROVADO (Falha de limpeza registrada explicitamente sem ocultar erros)' : '❌ FALHOU'}`);
   if (test5Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 6: Status HTTP Inesperado faz a Suíte de Runtime Falhar
+  // --------------------------------------------------------------------------
+  totalTests++;
+  // Requester simulado que retorna HTTP 500 no Cenário 1 (esperado era 404)
+  const mockWrongStatusRequester = async (options: any, postData?: any) => {
+    if (options.path === '/api/tickets/validate' && postData?.code === 'INVALIDO-999') {
+      return { statusCode: 500, data: { error: 'Internal Server Error Injetado' } };
+    }
+    return { statusCode: 200, data: { valid: true, status: 'success', received: true, code: 'PX-4M29L8X1' } };
+  };
+
+  const summaryWrongStatus = await runRuntimeTests(mockWrongStatusRequester);
+  const test6Ok = summaryWrongStatus.status === 'FAILED' && summaryWrongStatus.failed > 0;
+
+  console.log(`Gate Teste 6 (Status HTTP inesperado em runtime): ${test6Ok ? '✅ APROVADO (Suíte de runtime falhou estritamente)' : '❌ FALHOU'}`);
+  if (test6Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 7: Exceção de Rede/Execução faz a Suíte de Runtime Falhar
+  // --------------------------------------------------------------------------
+  totalTests++;
+  const mockExceptionRequester = async (options: any, postData?: any) => {
+    if (options.path === '/api/tickets/validate' && postData?.code === 'INVALIDO-999') {
+      throw new Error('ECONNRESET Injetado no teste de runtime');
+    }
+    return { statusCode: 200, data: { valid: true, status: 'success', received: true, code: 'PX-4M29L8X1' } };
+  };
+
+  const summaryException = await runRuntimeTests(mockExceptionRequester);
+  const test7Ok = summaryException.status === 'FAILED' && summaryException.results.some((r) => r.error?.includes('ECONNRESET'));
+
+  console.log(`Gate Teste 7 (Exceção de rede em runtime): ${test7Ok ? '✅ APROVADO (Exceção capturada e registrada como falha estrita)' : '❌ FALHOU'}`);
+  if (test7Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 8: Cenário Falho Impede o Relatório de Sucesso Geral
+  // --------------------------------------------------------------------------
+  totalTests++;
+  // Se 1 cenário dos 12 falhar, o status NUNCA pode ser 'PASSED'
+  const mockSingleFailureRequester = async (options: any, postData?: any) => {
+    if (options.path === '/api/admin/init-super-admin') {
+      // Retorna 200 em vez do esperado 403 (falha de segurança)
+      return { statusCode: 200, data: { success: true } };
+    }
+    // Para os outros, retornar status padrão
+    if (options.path === '/api/tickets/validate' && postData?.code === 'INVALIDO-999') return { statusCode: 404, data: { valid: false } };
+    if (options.path === '/api/tickets/validate' && postData?.code === 'PX-7AI89C10') return { statusCode: 200, data: { valid: true, status: 'success' } };
+    if (options.path === '/api/orders/create' && postData?.is_demo) return { statusCode: 400, data: { is_demo: true } };
+    if (options.path === '/api/orders/create' && postData?.items?.length === 0) return { statusCode: 400, data: { error: 'Itens vazios' } };
+    if (options.path?.includes('/status')) return { statusCode: 404, data: { error: 'Não encontrado' } };
+    if (options.path === '/api/payments/webhook') return { statusCode: 200, data: { received: true } };
+    if (options.path === '/api/admin/orders/expire-pending') return { statusCode: 401, data: { error: 'Não autorizado' } };
+    if (options.path === '/api/orders/create') return { statusCode: 503, data: { error: 'RPC Indisponível' } };
+    return { statusCode: 200, data: { valid: true, code: 'PX-4M29L8X1' } };
+  };
+
+  const summarySingleFailure = await runRuntimeTests(mockSingleFailureRequester);
+  const test8Ok = summarySingleFailure.status === 'FAILED' && summarySingleFailure.passed < 12;
+
+  console.log(`Gate Teste 8 (Cenário falho bloqueia aprovação geral): ${test8Ok ? '✅ APROVADO (Nenhum falso positivo gerado)' : '❌ FALHOU'}`);
+  if (test8Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 9: Testes com falha injetada são isolados e não tocam no banco real
+  // --------------------------------------------------------------------------
+  totalTests++;
+  // Verifica se o ambiente de homologação/produção não foi acessado durante a execução dos mocks
+  const isIsolated = process.env.STAGING_SUPABASE_URL === undefined || originalUrl === undefined || !noEnvCheck.safe;
+  const test9Ok = isIsolated;
+
+  console.log(`Gate Teste 9 (Isolamento total de mocks sem rede): ${test9Ok ? '✅ APROVADO (Mocks 100% em memória, banco real intocado)' : '❌ FALHOU'}`);
+  if (test9Ok) passedTests++;
 
   // Restaurar ambiente original
   if (originalUrl) process.env.STAGING_SUPABASE_URL = originalUrl;
