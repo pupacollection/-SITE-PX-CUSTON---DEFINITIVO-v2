@@ -175,6 +175,10 @@ BEGIN
     RAISE EXCEPTION 'Parâmetro inválido: O e-mail do usuário não pode ser nulo ou vazio.';
   END IF;
 
+  -- 2.1. Bloqueio consultivo transacional para garantir exclusividade entre instâncias concorrentes
+  -- Chave estável de 64 bits para bootstrap de Super Admin (hash estável de 'px_custom_first_super_admin_bootstrap_lock')
+  PERFORM pg_advisory_xact_lock(hashtext('px_custom_first_super_admin_bootstrap_lock'));
+
   -- 3. Garantia de unicidade da promoção inicial
   SELECT COUNT(*) INTO v_admin_count FROM public.profiles WHERE role = 'SUPER_ADMIN';
   IF v_admin_count > 0 THEN

@@ -3,17 +3,10 @@
  * 
  * Executa testes de ponta a ponta contra os endpoints HTTP do servidor local (porta 3000):
  * - Validação e Check-in com regras anti-fraude e anti-dupla-entrada
- * - Proteção de credenciais administrativas
- * - Integridade do Checkout e bloqueio de fallbacks não atômicos
- * - Proteção contra aprovação fraudulenta no webhook do Mercado Pago
- * - Proteção RBAC no endpoint de expiração de pedidos
- * 
- * Regras do Gate:
- * 1. Cada cenário possui asserção estrita do status HTTP esperado e do corpo retornado.
- * 2. Qualquer divergência ou exceção é contabilizada como FALHA.
- * 3. Encerra com código de saída 1 se QUALQUER cenário falhar.
- * 4. Só emite mensagem de sucesso se 100% dos testes passarem.
- * 5. Garante isolamento de estado resetando dados voláteis no setup e teardown.
+ * - Bloqueio de redefinição de demonstração em produção e rejeição de bypass público (reset_demo)
+ * - Autorização administrativa estrita para redefinição em ambiente de teste
+ * - Rejeição incondicional do segredo padrão antigo descartado (px_custom_super_admin_bootstrap_secret_2026_secure)
+ * - Validações transacionais de pedidos e webhooks de pagamento
  */
 
 import http from 'http';
@@ -70,25 +63,33 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   let passedCount = 0;
   let failedCount = 0;
 
+  const adminSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET || 'px_test_super_admin_secret_token_secure_2026';
+
   // --------------------------------------------------------------------------
-  // Setup: Reset de estado de ingressos demo para isolamento estrito entre execuções
+  // Setup: Reset controlado do estado via rota administrativa autorizada
   // --------------------------------------------------------------------------
   try {
     await requester({
       hostname: 'localhost',
       port: 3000,
-      path: '/api/tickets/validate',
+      path: '/api/admin/tickets/reset-demo',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-7AI89C10', reset_demo: true });
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminSecret}`,
+      },
+    }, { code: 'PX-7AI89C10' });
 
     await requester({
       hostname: 'localhost',
       port: 3000,
-      path: '/api/tickets/validate',
+      path: '/api/admin/tickets/reset-demo',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-4M29L8X1', reset_demo: true });
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminSecret}`,
+      },
+    }, { code: 'PX-4M29L8X1' });
   } catch (err: any) {
     console.warn('⚠️ [Setup de Runtime] Aviso ao resetar estado de teste:', err.message);
   }
@@ -198,10 +199,121 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 4: Inicialização de Super Admin com senha incorreta deve retornar HTTP 403
+  // Cenário 4: SEGURANÇA: Requisição pública com reset_demo: true NÃO reseta ingresso e retorna 409
   // --------------------------------------------------------------------------
   await executeScenario(
     4,
+    'Segurança: Requisição pública com reset_demo: true é rejeitada e ingresso continua bloqueado',
+    409,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/tickets/validate',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, { code: 'PX-7AI89C10', reset_demo: true }),
+    (data) => data && data.valid === false && data.status === 'already_used'
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 5: SEGURANÇA: Chamada a /api/admin/tickets/reset-demo sem autorização retorna 401
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    5,
+    'Segurança: Chamada a /api/admin/tickets/reset-demo sem autorização retorna HTTP 401',
+    401,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/tickets/reset-demo',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, { code: 'PX-7AI89C10' }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 6: SEGURANÇA: Chamada com token incorreto a /api/admin/tickets/reset-demo retorna 403
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    6,
+    'Segurança: Chamada com token incorreto a /api/admin/tickets/reset-demo retorna HTTP 403',
+    403,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/tickets/reset-demo',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer token_invalido_hacker_1234567890',
+      },
+    }, { code: 'PX-7AI89C10' }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 7: SEGURANÇA: Chamada com o segredo padrão antigo descartado retorna 403
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    7,
+    'Segurança: Segredo padrão antigo descartado (px_custom_super_admin_bootstrap_secret_2026_secure) é rejeitado',
+    403,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/tickets/reset-demo',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer px_custom_super_admin_bootstrap_secret_2026_secure',
+      },
+    }, { code: 'PX-7AI89C10' }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 8: Redefinição autorizada via endpoint administrativo com token de servidor válido retorna 200
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    8,
+    'Autorização: Redefinição legítima via /api/admin/tickets/reset-demo retorna HTTP 200',
+    200,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/tickets/reset-demo',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminSecret}`,
+      },
+    }, { code: 'PX-7AI89C10' }),
+    (data) => data && data.success === true && data.reset === true
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 9: Revalidação após reset autorizado: ingresso volta a ser aceito com HTTP 200
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    9,
+    'Validação normal: Ingresso volta a ser aceito após redefinição administrativa autorizada',
+    200,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/tickets/validate',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, { code: 'PX-7AI89C10' }),
+    (data) => data && data.valid === true && data.status === 'success'
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 10: Inicialização de Super Admin com senha incorreta deve retornar HTTP 403
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    10,
     'Tentativa de Init Super Admin com segredo incorreto',
     403,
     () => requester({
@@ -215,10 +327,10 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 5: Bloqueio estrito de checkout comercial em evento de demonstração (DEMO)
+  // Cenário 11: Bloqueio estrito de checkout comercial em evento de demonstração (DEMO)
   // --------------------------------------------------------------------------
   await executeScenario(
-    5,
+    11,
     'Bloqueio de pedido comercial em Evento DEMO',
     400,
     () => requester({
@@ -236,10 +348,10 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 6: Rejeição de pedido com itens vazios ou formato inválido
+  // Cenário 12: Rejeição de pedido com itens vazios ou formato inválido
   // --------------------------------------------------------------------------
   await executeScenario(
-    6,
+    12,
     'Validação de integridade de payload no Checkout',
     400,
     () => requester({
@@ -249,34 +361,35 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, {
-      event_id: 'evt-valido-123',
+      event_id: 'evt-carros-antigos-2025',
       items: [],
+      buyer: { name: 'Comprador Teste', email: 'teste@px.com' },
     }),
     (data) => Boolean(data && data.error)
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 7: Consulta de status de pedido não existente deve retornar HTTP 404
+  // Cenário 13: Consulta de status de pedido não existente deve retornar HTTP 404
   // --------------------------------------------------------------------------
   await executeScenario(
-    7,
+    13,
     'Consulta de status de pedido não existente',
     404,
     () => requester({
       hostname: 'localhost',
       port: 3000,
-      path: '/api/orders/ord-inexistente-999/status',
+      path: '/api/orders/00000000-0000-0000-0000-000000000000/status',
       method: 'GET',
     }),
     (data) => Boolean(data && data.error)
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 8: Notificação de Webhook oficial do Mercado Pago
+  // Cenário 14: Confirmação de recebimento no Webhook do Mercado Pago (ping/teste)
   // --------------------------------------------------------------------------
   await executeScenario(
-    8,
-    'Confirmação de recebimento do Webhook oficial',
+    14,
+    'Confirmação de recebimento do Webhook oficial (ping de verificação)',
     200,
     () => requester({
       hostname: 'localhost',
@@ -285,17 +398,18 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, {
-      action: 'payment.updated',
-      data: { id: 'mp-test-notification-001' },
+      action: 'payment.created',
+      data: { id: 'mp-test-ping-1' },
+      type: 'payment',
     }),
-    (data) => Boolean(data && data.received)
+    (data) => data && data.received === true
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 9: Proteção RBAC no endpoint administrativo de expiração de pedidos
+  // Cenário 15: Tentativa de expirar pedidos sem token administrativo retorna 401
   // --------------------------------------------------------------------------
   await executeScenario(
-    9,
+    15,
     'Proteção RBAC na expiração de pedidos (sem token)',
     401,
     () => requester({
@@ -309,10 +423,10 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 10: Erro controlado no checkout e ausência total de fallback não atômico
+  // Cenário 16: Checkout sem fallback perigoso quando RPC não está disponível
   // --------------------------------------------------------------------------
   await executeScenario(
-    10,
+    16,
     'Erro controlado no checkout (sem fallback inseguro)',
     503,
     () => requester({
@@ -322,18 +436,19 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, {
-      event_id: '00000000-0000-0000-0000-000000000001',
-      items: [{ batch_id: '00000000-0000-0000-0000-000000000002', quantity: 2 }],
-      buyer: { name: 'Comprador Teste Integridade', email: 'integridade@px.com' },
+      event_id: '00000000-0000-0000-0000-000000000000',
+      items: [{ batch_id: 'batch-test-1', quantity: 1, unit_price: 50.0 }],
+      buyer: { name: 'Comprador Fallback', email: 'fallback@px.com' },
+      payment_method: 'pix',
     }),
-    (data) => Boolean(data && data.error)
+    (data) => Boolean(data && data.error && (data.error.includes('integridade') || data.error.includes('manutenção') || data.error.includes('indisponível') || data.code === 'RPC_NOT_AVAILABLE'))
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 11: Leitura de QR code com formato oficial emitido ("PX:PX-4M29L8X1:evento")
+  // Cenário 17: Extração e validação de QR Payload completo no check-in
   // --------------------------------------------------------------------------
   await executeScenario(
-    11,
+    17,
     'Extração e validação de QR Payload completo',
     200,
     () => requester({
@@ -342,15 +457,15 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       path: '/api/tickets/validate',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX:PX-4M29L8X1:evt-mega-encontro-2025' }),
+    }, { code: 'PX:PX-4M29L8X1:1111-2222-3333' }),
     (data) => data && data.valid === true && data.code === 'PX-4M29L8X1'
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 12: Bloqueio de aprovação direta fraudulenta via body no Webhook
+  // Cenário 18: Bloqueio de aprovação fraudulenta por injeção de status no Webhook
   // --------------------------------------------------------------------------
   await executeScenario(
-    12,
+    18,
     'Bloqueio de aprovação fraudulenta via body no Webhook',
     200,
     () => requester({
@@ -368,24 +483,30 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Teardown: Limpeza final de estado volátil
+  // Teardown: Limpeza final de estado via rota administrativa autorizada
   // --------------------------------------------------------------------------
   try {
     await requester({
       hostname: 'localhost',
       port: 3000,
-      path: '/api/tickets/validate',
+      path: '/api/admin/tickets/reset-demo',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-7AI89C10', reset_demo: true });
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminSecret}`,
+      },
+    }, { code: 'PX-7AI89C10' });
 
     await requester({
       hostname: 'localhost',
       port: 3000,
-      path: '/api/tickets/validate',
+      path: '/api/admin/tickets/reset-demo',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-4M29L8X1', reset_demo: true });
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminSecret}`,
+      },
+    }, { code: 'PX-4M29L8X1' });
   } catch {
     // Teardown silencioso
   }
@@ -393,24 +514,25 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   // --------------------------------------------------------------------------
   // Avaliação Final do Gate
   // --------------------------------------------------------------------------
-  const allPassed = failedCount === 0 && passedCount === 12;
+  const totalScenarios = 18;
+  const allPassed = failedCount === 0 && passedCount === totalScenarios;
   console.log('\n==============================================================================');
   if (allPassed) {
-    console.log(`🎉 TODOS OS 12 CENÁRIOS DE RUNTIME DA API PASSARAM COM SUCESSO! (${passedCount}/12)`);
+    console.log(`🎉 TODOS OS ${totalScenarios} CENÁRIOS DE RUNTIME DA API PASSARAM COM SUCESSO! (${passedCount}/${totalScenarios})`);
     console.log('==============================================================================\n');
     return {
       status: 'PASSED',
-      total: 12,
+      total: totalScenarios,
       passed: passedCount,
-      failed: 0,
+      failed: failedCount,
       results,
     };
   } else {
-    console.error(`❌ A SUÍTE DE RUNTIME FALHOU: ${failedCount} de 12 cenários falharam! (Aprovados: ${passedCount}/12)`);
+    console.error(`💥 SUÍTE DE RUNTIME REPROVADA: ${failedCount} CENÁRIO(S) COM FALHA (${passedCount}/${totalScenarios} aprovados)`);
     console.log('==============================================================================\n');
     return {
       status: 'FAILED',
-      total: 12,
+      total: totalScenarios,
       passed: passedCount,
       failed: failedCount,
       results,
@@ -418,18 +540,14 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   }
 }
 
-// Execução direta via CLI com tratamento estrito do código de saída do processo
+// Execução direta via CLI
 if (process.argv[1] && process.argv[1].endsWith('test-api-runtime.ts')) {
-  runRuntimeTests()
-    .then((summary) => {
-      if (summary.status === 'PASSED') {
-        process.exit(0);
-      } else {
-        process.exit(1);
-      }
-    })
-    .catch((err) => {
-      console.error('💥 Exceção fatal na execução da suíte de runtime:', err);
+  runRuntimeTests().then((summary) => {
+    if (summary.status !== 'PASSED') {
       process.exit(1);
-    });
+    }
+  }).catch((err) => {
+    console.error('Erro fatal ao executar testes de runtime:', err);
+    process.exit(1);
+  });
 }

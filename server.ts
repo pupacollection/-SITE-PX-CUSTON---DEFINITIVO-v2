@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const isProd = process.env.NODE_ENV === 'production';
+const isProductionEnvironment = () => process.env.PX_ENVIRONMENT === 'production' || process.env.NODE_ENV === 'production' || isProd;
 
 // Aceitar payloads com imagens codificadas em Base64 (ícones PWA multi-resolução)
 app.use(express.json({ limit: '10mb' }));
@@ -44,6 +45,7 @@ const demoUsedTickets = new Map<string, { checkin_at: string; operator: string; 
 // Rate-limiting simples para endpoint de inicialização administrativa (proteção anti-força-bruta)
 let adminInitFailedAttempts = 0;
 let adminInitLockoutUntil = 0;
+let isInitAdminInProgress = false;
 
 // Middleware: Authenticate Bearer Token via Supabase Auth
 interface AuthenticatedRequest extends Request {
@@ -485,11 +487,8 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
     cleanCode = parts[1].trim();
   }
 
-  // Em ambiente de desenvolvimento e testes: suporte a reset_demo para isolamento entre baterias
-  if (req.body.reset_demo === true) {
-    demoUsedTickets.delete(cleanCode);
-    return res.json({ reset: true, code: cleanCode });
-  }
+  // SEGURANÇA: Parâmetros arbitrários de reset no corpo desta rota pública são estritamente desconsiderados.
+  // Validação e proteção anti-dupla-entrada prosseguem sem bypass.
 
   try {
     // 1. Tentar validação atômica via stored procedure com bloqueio FOR UPDATE (Anti-Concorrência)
@@ -546,7 +545,7 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
     if (!updateError && updatedTickets && updatedTickets.length > 0) {
       const ticket = updatedTickets[0];
       // Gravar registro na tabela checkins para integridade e auditoria
-      await supabaseAdmin.from('checkins').insert({
+      const { error: checkinInsertError } = await supabaseAdmin.from('checkins').insert({
         ticket_id: ticket.id,
         event_id: ticket.event_id,
         operator_id: operator_id || null,
@@ -554,6 +553,17 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
         status: 'success',
         created_at: checkinTime,
       });
+
+      if (checkinInsertError) {
+        // Se a gravação da auditoria falhar, reverter status do ingresso para 'paid' para evitar falso sucesso ou registro fantasma
+        await supabaseAdmin.from('tickets').update({ status: 'paid', checkin_at: null, checkin_device_id: null }).eq('id', ticket.id);
+        return res.status(500).json({
+          valid: false,
+          code: cleanCode,
+          status: 'error',
+          message: 'Falha operacional ao registrar auditoria de check-in. O ingresso não foi consumido e permanece válido.',
+        });
+      }
 
       return res.json({
         valid: true,
@@ -582,12 +592,22 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
         holder: usedTicket.holder_name,
       });
     }
-  } catch (err) {
-    console.warn('[Check-in API] Banco de dados em inicialização, consultando catálogo de homologação.');
+  } catch (err: any) {
+    console.warn('[Check-in API] Erro operacional no banco de dados:', err?.message || err);
+    // Em produção, falha de banco deve retornar erro operacional 503, distinguindo de ingresso inexistente (404)
+    if (isProductionEnvironment()) {
+      return res.status(503).json({
+        valid: false,
+        code: cleanCode,
+        status: 'service_unavailable',
+        message: 'Serviço de validação temporariamente indisponível devido a falha operacional no banco de dados. Tente novamente.',
+      });
+    }
   }
 
-  // 3. Validação contra lista autorizada de demonstração com proteção ESTRITA ANTI-DUPLA-ENTRADA
-  if (cleanCode === 'PX-7AI89C10' || cleanCode === 'PX-4M29L8X1') {
+  // 3. Validação contra lista autorizada de demonstração (Exclusiva para desenvolvimento / testes)
+  // Em PRODUÇÃO, nenhum código demo é aceito fora do banco de dados oficial. Ingressos não encontrados retornam 404.
+  if (!isProductionEnvironment() && (cleanCode === 'PX-7AI89C10' || cleanCode === 'PX-4M29L8X1')) {
     const alreadyUsed = demoUsedTickets.get(cleanCode);
     if (alreadyUsed) {
       return res.status(409).json({
@@ -627,8 +647,86 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
   });
 });
 
+// Admin Route: Redefinição controlada de estado de demonstração (Isolado para desenvolvimento/testes)
+// DESATIVADO categoricamente em produção e protegido por autorização administrativa / segredo forte do servidor
+app.post('/api/admin/tickets/reset-demo', async (req: Request, res: Response) => {
+  // 1. Bloqueio incondicional em ambiente de produção:
+  // Se a aplicação estiver em produção, o endpoint é estritamente 404 (inexistente).
+  // NENHUM cabeçalho enviado pelo cliente (como 'x-px-test-runner', 'host', 'x-forwarded-for')
+  // tem permissão de reativar ou burlar o bloqueio em produção.
+  if (isProductionEnvironment()) {
+    return res.status(404).json({ error: 'Endpoint indisponível em ambiente de produção.' });
+  }
+
+  // 2. Não confiar em corpo HTTP comum: exigir autorização via header administrativo
+  const authHeader = req.headers.authorization || (req.headers['x-admin-token'] as string);
+  if (!authHeader) {
+    return res.status(401).json({
+      error: 'Acesso negado: Cabeçalho de autorização não fornecido.',
+    });
+  }
+
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+  // Segredo administrativo configurado explicitamente no ambiente (mínimo 24 caracteres alinhado à política de segurança)
+  const expectedSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET;
+
+  let authorized = false;
+
+  // A. Comparação em tempo constante se houver segredo configurado no ambiente (mínimo 24 caracteres)
+  if (expectedSecret && expectedSecret.length >= 24) {
+    const secretBuffer = Buffer.from(String(token));
+    const expectedBuffer = Buffer.from(String(expectedSecret));
+    if (secretBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(secretBuffer, expectedBuffer)) {
+      authorized = true;
+    }
+  }
+
+  // B. Se não bateu com o segredo do ambiente, validar via Supabase Auth (JWT de usuário com papel ADMIN ou SUPER_ADMIN)
+  if (!authorized) {
+    try {
+      const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+      if (!error && user) {
+        const { data: profile } = await supabaseAdmin
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+        if (profile?.role === 'ADMIN' || profile?.role === 'SUPER_ADMIN') {
+          authorized = true;
+        }
+      }
+    } catch {
+      // Falha silenciosa de auth
+    }
+  }
+
+  if (!authorized) {
+    return res.status(403).json({
+      error: 'Acesso negado: Credenciais administrativas inválidas ou insuficientes.',
+    });
+  }
+
+  const { code } = req.body || {};
+  if (code) {
+    const cleanCode = String(code).trim().toUpperCase();
+    demoUsedTickets.delete(cleanCode);
+    return res.json({ success: true, reset: true, code: cleanCode });
+  }
+
+  demoUsedTickets.clear();
+  return res.json({ success: true, reset_all: true });
+});
+
 // Admin Route: Iniciação segura do primeiro SUPER_ADMIN (Requer segredo forte de servidor)
 app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
+  // 1. Prevenção de concorrência: mutex em processo para impedir inicializações simultâneas
+  if (isInitAdminInProgress) {
+    return res.status(409).json({
+      error: 'Operação concorrente detectada: Inicialização de SUPER_ADMIN já em andamento. Aguarde a conclusão.',
+    });
+  }
+
   const now = Date.now();
   if (adminInitLockoutUntil > now) {
     const remainingSecs = Math.ceil((adminInitLockoutUntil - now) / 1000);
@@ -638,7 +736,7 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
   }
 
   const { email, setup_secret } = req.body;
-  const expectedSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET || 'px_custom_super_admin_bootstrap_secret_2026_secure';
+  const expectedSecret = process.env.PX_SUPER_ADMIN_INIT_TOKEN || process.env.SUPABASE_INIT_SECRET;
 
   if (!expectedSecret || expectedSecret.length < 24) {
     return res.status(500).json({
@@ -669,12 +767,90 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
   // Resetar contagem em caso de acerto
   adminInitFailedAttempts = 0;
 
+  // Ativar bloqueio de concorrência
+  isInitAdminInProgress = true;
+
   try {
-    // 1. Verificar se já existe algum SUPER_ADMIN
-    const { data: existingAdmins } = await supabaseAdmin
+    const cleanEmail = email.toLowerCase().trim();
+
+    // Consultar o usuário e perfil antes da operação para conhecer o estado prévio (evita rebaixamento cego)
+    const { data: usersData, error: userListError } = await supabaseAdmin.auth.admin.listUsers();
+    if (userListError) throw userListError;
+
+    const authUser = usersData?.users?.find((u) => u.email?.toLowerCase() === cleanEmail);
+    if (!authUser) {
+      return res.status(404).json({
+        error: 'Usuário com o e-mail informado não encontrado no Supabase Auth. Faça o cadastro primeiro.',
+      });
+    }
+
+    const { data: existingProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('id, role')
+      .eq('id', authUser.id)
+      .maybeSingle();
+
+    const previousRole = existingProfile?.role || authUser.user_metadata?.role || 'USER';
+
+    // 2. Proteção atômica via Stored Procedure do banco (PostgreSQL transactional)
+    try {
+      const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('promote_first_super_admin', {
+        target_email: cleanEmail,
+      });
+
+      if (!rpcError && rpcResult) {
+        // Sincronizar metadata no Auth com tratamento explícito de falha
+        const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+          user_metadata: { ...(authUser.user_metadata || {}), role: 'SUPER_ADMIN' },
+        });
+
+        if (authUpdateError) {
+          // Reversão segura e localizada: restaurar o perfil para previousRole para não deixar estado indeterminado
+          await supabaseAdmin
+            .from('profiles')
+            .update({ role: previousRole, updated_at: new Date().toISOString() })
+            .eq('id', authUser.id);
+
+          return res.status(502).json({
+            error: 'Falha na sincronização com Supabase Auth: os metadados de autenticação não puderam ser atualizados. A operação foi cancelada e o perfil revertido para o estado anterior para garantir a consistência.',
+            details: authUpdateError.message,
+          });
+        }
+
+        return res.json({
+          success: true,
+          message: 'Primeiro SUPER_ADMIN oficial da PX CUSTON promovido com sucesso!',
+          email: cleanEmail,
+          role: 'SUPER_ADMIN',
+        });
+      }
+
+      if (rpcError) {
+        if (rpcError.message?.includes('Já existe um SUPER_ADMIN') || rpcError.message?.includes('Ação bloqueada')) {
+          return res.status(403).json({
+            error: 'Ação bloqueada: Já existe um SUPER_ADMIN registrado no sistema. Novas permissões devem ser realizadas pelo painel administrativo autenticado.',
+          });
+        }
+        if (rpcError.message?.includes('não possui perfil cadastrado') || rpcError.message?.includes('Usuário não encontrado')) {
+          return res.status(404).json({
+            error: 'Usuário com o e-mail informado não possui perfil cadastrado na plataforma.',
+          });
+        }
+      }
+    } catch {
+      // Falha ao invocar RPC, prosseguir para fallback com compensação transacional
+    }
+
+    // 3. Fallback atômico no backend com verificação estrita e reversão compensatória
+    // A. Verificar se já existe algum SUPER_ADMIN na tabela profiles
+    const { data: existingAdmins, error: adminCheckError } = await supabaseAdmin
       .from('profiles')
       .select('id, email')
       .eq('role', 'SUPER_ADMIN');
+
+    if (adminCheckError) {
+      return res.status(500).json({ error: 'Falha ao verificar administradores existentes no banco de dados.' });
+    }
 
     if (existingAdmins && existingAdmins.length > 0) {
       return res.status(403).json({
@@ -682,36 +858,49 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
       });
     }
 
-    // 2. Localizar usuário no Auth
-    const { data: usersData, error: userError } = await supabaseAdmin.auth.admin.listUsers();
-    if (userError) throw userError;
+    const prevMetadata = { ...(authUser.user_metadata || {}) };
 
-    const user = usersData.users.find((u) => u.email?.toLowerCase() === email.toLowerCase().trim());
-    if (!user) {
-      return res.status(404).json({
-        error: `Usuário com o e-mail informado não encontrado no Supabase Auth. Faça o cadastro primeiro.`,
+    // B. Atualizar metadata no Auth primeiro com verificação explícita de erro
+    const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+      user_metadata: { ...prevMetadata, role: 'SUPER_ADMIN' },
+    });
+
+    if (authError) {
+      return res.status(500).json({
+        error: `Falha ao atualizar metadados de autenticação do usuário no Supabase Auth: ${authError.message}`,
       });
     }
 
-    // 3. Atualizar metadata no auth
-    await supabaseAdmin.auth.admin.updateUserById(user.id, {
-      user_metadata: { ...user.user_metadata, role: 'SUPER_ADMIN' },
-    });
-
-    // 4. Atualizar role em public.profiles
-    await supabaseAdmin
+    // C. Atualizar role em public.profiles com verificação explícita de erro
+    const { data: updatedProfile, error: profileUpdateError } = await supabaseAdmin
       .from('profiles')
       .update({ role: 'SUPER_ADMIN', updated_at: new Date().toISOString() })
-      .eq('id', user.id);
+      .eq('id', authUser.id)
+      .select();
+
+    if (profileUpdateError || !updatedProfile || updatedProfile.length === 0) {
+      // Compensação transacional (Rollback): Reverter o Auth metadata para evitar inconsistência
+      await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
+        user_metadata: { ...prevMetadata, role: previousRole },
+      });
+
+      return res.status(500).json({
+        error: 'Falha ao persistir papel SUPER_ADMIN na tabela profiles. Os metadados no Auth foram revertidos para manter a consistência do sistema.',
+        details: profileUpdateError?.message || 'Nenhum registro atualizado.',
+      });
+    }
 
     return res.json({
       success: true,
       message: 'Primeiro SUPER_ADMIN oficial da PX CUSTON promovido com sucesso!',
-      user_id: user.id,
+      user_id: authUser.id,
       role: 'SUPER_ADMIN',
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Falha interna ao processar inicialização administrativa.' });
+  } finally {
+    // Liberar o mutex
+    isInitAdminInProgress = false;
   }
 });
 
