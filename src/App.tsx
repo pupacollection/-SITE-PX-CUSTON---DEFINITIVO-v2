@@ -9,8 +9,6 @@ import {
 } from './types';
 import {
   INITIAL_EVENTS,
-  INITIAL_USER,
-  INITIAL_TICKETS,
   INITIAL_MERCADO_PAGO_CONFIG,
 } from './data/initialData';
 import { Header } from './components/common/Header';
@@ -39,13 +37,13 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ActiveScreen>('home');
   const [profileInitialTab, setProfileInitialTab] = useState<ProfileTab>('profile');
   const [user, setUser] = useState<UserProfile | null>(null);
-  const [events, setEvents] = useState<EventItem[]>(INITIAL_EVENTS);
+  const [events, setEvents] = useState<EventItem[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<EventItem>(INITIAL_EVENTS[0]);
   const [selectedBatches, setSelectedBatches] = useState<{ batch: TicketBatch; quantity: number }[]>([
     { batch: INITIAL_EVENTS[0].ticket_batches[0], quantity: 2 },
   ]);
-  const [tickets, setTickets] = useState<Ticket[]>(INITIAL_TICKETS);
-  const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(INITIAL_TICKETS[0]);
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [mercadoPagoConfig, setMercadoPagoConfig] = useState<MercadoPagoConfig>(INITIAL_MERCADO_PAGO_CONFIG);
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
@@ -57,11 +55,113 @@ export default function App() {
         .select('*, ticket_batches(*)')
         .order('date', { ascending: true });
 
-      if (data && !error) {
-        setEvents(data);
+      if (error || !data) {
+        if (error) {
+          console.warn('[PX CUSTON] Erro ao consultar eventos no Supabase:', error.message);
+        }
+        setEvents([]);
+        return;
+      }
+
+      const normalizedEvents: EventItem[] = data.map((row: any) => ({
+        id: row.id,
+        title: row.title,
+        slug: row.slug,
+        subtitle: row.subtitle || undefined,
+        date: row.date,
+        formatted_date: row.formatted_date || '',
+        location: row.location,
+        city: row.city,
+        state: row.state,
+        min_price:
+          typeof row.min_price === 'number'
+            ? row.min_price
+            : parseFloat(row.min_price || '0') || 0,
+        cover_image: row.cover_image,
+        gallery_images: Array.isArray(row.gallery_images) ? row.gallery_images : [],
+        description: row.description || '',
+        tags: Array.isArray(row.tags) ? row.tags : [],
+        classification: row.classification || 'Classificação 16 anos',
+        rules: Array.isArray(row.rules) ? row.rules : [],
+        is_official: Boolean(row.is_official),
+        is_demo: Boolean(row.is_demo),
+        status: row.status || 'published',
+        ticket_batches: Array.isArray(row.ticket_batches)
+          ? row.ticket_batches.map((b: any) => ({
+              ...b,
+              price: typeof b.price === 'number' ? b.price : parseFloat(b.price || '0') || 0,
+            }))
+          : [],
+      }));
+
+      setEvents(normalizedEvents);
+
+      const firstOfficial = normalizedEvents.find(
+        (evt) => !evt.is_demo && evt.is_official !== false && (!evt.status || evt.status === 'published')
+      );
+      if (firstOfficial) {
+        setSelectedEvent(firstOfficial);
+        if (firstOfficial.ticket_batches.length > 0) {
+          setSelectedBatches([{ batch: firstOfficial.ticket_batches[0], quantity: 1 }]);
+        }
       }
     } catch (err) {
       console.warn('[PX CUSTON] Erro ao sincronizar eventos do Supabase:', err);
+      setEvents([]);
+    }
+  }, []);
+
+  // Sincronização dos ingressos reais do usuário autenticado
+  const fetchUserTicketsFromDatabase = React.useCallback(async (userId: string, holderNameFallback?: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*, events(title, formatted_date, location, city, state), ticket_batches(name, price)')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (error || !data) {
+        setTickets([]);
+        setSelectedTicket(null);
+        return;
+      }
+
+      const mappedTickets: Ticket[] = data.map((row: any) => {
+        const evt = row.events || {};
+        const batch = row.ticket_batches || {};
+        const locationLabel = [evt.location, evt.city && evt.state ? `${evt.city}/${evt.state}` : evt.city]
+          .filter(Boolean)
+          .join(', ');
+        return {
+          id: row.id,
+          code: row.code,
+          order_id: row.order_id,
+          user_id: row.user_id,
+          event_id: row.event_id,
+          batch_id: row.batch_id,
+          event_title: evt.title || 'Evento PX CUSTON',
+          event_date: evt.formatted_date || '',
+          event_location: locationLabel || 'Local Oficial PX CUSTON',
+          batch_name: batch.name || 'Ingresso Oficial',
+          holder_name: row.holder_name || holderNameFallback || 'Titular PX',
+          holder_doc: row.holder_doc || '',
+          price:
+            typeof row.price === 'number'
+              ? row.price
+              : parseFloat(row.price ?? batch.price ?? '0') || 0,
+          status: row.status || 'pending',
+          qr_payload: row.qr_payload || row.code,
+          checkin_at: row.checkin_at || undefined,
+          created_at: row.created_at,
+        };
+      });
+
+      setTickets(mappedTickets);
+      setSelectedTicket(mappedTickets[0] || null);
+    } catch (err) {
+      console.warn('[PX CUSTON] Erro ao sincronizar ingressos do usuário:', err);
+      setTickets([]);
+      setSelectedTicket(null);
     }
   }, []);
 
@@ -83,9 +183,12 @@ export default function App() {
       if (session?.user) {
         getCurrentUserProfile(session.user).then((profile) => {
           setUser(profile);
+          fetchUserTicketsFromDatabase(session.user.id, profile.full_name);
         });
       } else {
         setUser(null);
+        setTickets([]);
+        setSelectedTicket(null);
       }
     });
 
@@ -96,9 +199,12 @@ export default function App() {
       if (session?.user) {
         const profile = await getCurrentUserProfile(session.user);
         setUser(profile);
+        fetchUserTicketsFromDatabase(session.user.id, profile.full_name);
       } else {
-        // Se deslogou, remove o usuário
+        // Se deslogou, remove o usuário e limpa ingressos da sessão
         setUser(null);
+        setTickets([]);
+        setSelectedTicket(null);
       }
     });
 
@@ -108,7 +214,7 @@ export default function App() {
     return () => {
       subscription.unsubscribe();
     };
-  }, [fetchEventsFromDatabase]);
+  }, [fetchEventsFromDatabase, fetchUserTicketsFromDatabase]);
 
   // Histórico de navegação e telas administrativas
   const [historyStack, setHistoryStack] = useState<ActiveScreen[]>([]);
@@ -259,6 +365,8 @@ export default function App() {
       console.warn('Erro ao deslogar do Supabase:', e);
     }
     setUser(null);
+    setTickets([]);
+    setSelectedTicket(null);
     handleNavigate('home');
   };
 

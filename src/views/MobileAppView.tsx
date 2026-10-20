@@ -27,7 +27,21 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
   onSelectEvent,
   onNavigate,
 }) => {
-  const nextEvent = events[0];
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const upcomingEvents = events.filter((event) => {
+    const isPublished = !event.status || event.status === 'published';
+    const isOfficial = !event.is_demo && event.is_official !== false;
+    const parsedDate = event.date ? new Date(event.date) : null;
+    const isUpcoming =
+      parsedDate && !isNaN(parsedDate.getTime())
+        ? parsedDate.getTime() >= startOfToday.getTime()
+        : true;
+    return isPublished && isOfficial && isUpcoming;
+  });
+
+  const nextEvent = upcomingEvents[0];
 
   return (
     <div className="min-h-screen bg-[#000000] text-white pb-20">
@@ -39,10 +53,10 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => onNavigate('digital_ticket')}
-            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300 relative"
+            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300 hover:text-white relative"
+            title="Meus Ingressos"
           >
             <Ticket className="w-4 h-4" />
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-[#FF1A2D] rounded-full"></span>
           </button>
           <button
             onClick={() => onNavigate('profile', 'orders')}
@@ -110,7 +124,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                 <div>
                   <span className="text-[10px] text-zinc-400 block">Ingresso a partir de</span>
                   <span className="text-sm font-extrabold text-[#FF1A2D]">
-                    R$ {nextEvent.min_price.toFixed(2).replace('.', ',')}
+                    R$ {Number(nextEvent.min_price || 0).toFixed(2).replace('.', ',')}
                   </span>
                 </div>
                 <button
@@ -172,33 +186,41 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
             </button>
           </div>
 
-          <div className="space-y-3">
-            {events.slice(1).map((evt) => (
-              <div
-                key={evt.id}
-                onClick={() => onSelectEvent(evt)}
-                className="bg-[#121212] border border-[#222] hover:border-[#333] p-3 rounded-xl flex items-center gap-3 cursor-pointer group transition"
-              >
-                <img
-                  src={evt.cover_image}
-                  alt={evt.title}
-                  className="w-20 h-20 rounded-lg object-cover shrink-0"
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-[10px] text-[#FF1A2D] font-bold uppercase tracking-wider">
-                    {evt.formatted_date}
+          {upcomingEvents.slice(1).length === 0 ? (
+            <div className="bg-[#121212] border border-[#222] p-4 rounded-xl text-center text-xs text-zinc-400">
+              {nextEvent
+                ? 'Mais encontros oficiais serão divulgados em breve.'
+                : 'Nenhum evento oficial com ingressos abertos no momento.'}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {upcomingEvents.slice(1).map((evt) => (
+                <div
+                  key={evt.id}
+                  onClick={() => onSelectEvent(evt)}
+                  className="bg-[#121212] border border-[#222] hover:border-[#333] p-3 rounded-xl flex items-center gap-3 cursor-pointer group transition"
+                >
+                  <img
+                    src={evt.cover_image}
+                    alt={evt.title}
+                    className="w-20 h-20 rounded-lg object-cover shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[10px] text-[#FF1A2D] font-bold uppercase tracking-wider">
+                      {evt.formatted_date}
+                    </div>
+                    <h4 className="text-sm font-black text-white group-hover:text-[#FF1A2D] transition truncate uppercase">
+                      {evt.title}
+                    </h4>
+                    <p className="text-[11px] text-zinc-400 truncate">{evt.city}/{evt.state}</p>
+                    <p className="text-xs font-bold text-zinc-200 mt-1">
+                      A partir de R$ {Number(evt.min_price || 0).toFixed(2).replace('.', ',')}
+                    </p>
                   </div>
-                  <h4 className="text-sm font-black text-white group-hover:text-[#FF1A2D] transition truncate uppercase">
-                    {evt.title}
-                  </h4>
-                  <p className="text-[11px] text-zinc-400 truncate">{evt.city}/{evt.state}</p>
-                  <p className="text-xs font-bold text-zinc-200 mt-1">
-                    A partir de R$ {evt.min_price.toFixed(2).replace('.', ',')}
-                  </p>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

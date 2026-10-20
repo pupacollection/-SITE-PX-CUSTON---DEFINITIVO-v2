@@ -1175,49 +1175,55 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </button>
               </div>
 
-              <div className="space-y-3">
-                {tickets.slice(0, 3).map((tkt) => (
-                  <div
-                    key={tkt.id}
-                    className="bg-[#181818] border border-[#262626] hover:border-[#333] p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-xl bg-[#222] flex items-center justify-center text-[#FF1A2D] shrink-0 border border-[#333]">
-                        <TicketIcon className="w-6 h-6" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-black text-white uppercase">{tkt.event_title}</h4>
-                        <p className="text-xs text-zinc-400 mt-0.5">{tkt.event_date}</p>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          <span className="text-[10px] font-mono text-zinc-400 bg-[#111] px-2 py-0.5 rounded border border-[#222]">
-                            {tkt.code}
-                          </span>
-                          {tkt.status === 'paid' ? (
-                            <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
-                              <CheckCircle2 className="w-3 h-3" /> Confirmado
+              {tickets.length === 0 ? (
+                <p className="text-xs text-zinc-400">
+                  Você ainda não possui ingressos emitidos nesta conta.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {tickets.slice(0, 3).map((tkt) => (
+                    <div
+                      key={tkt.id}
+                      className="bg-[#181818] border border-[#262626] hover:border-[#333] p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-xl bg-[#222] flex items-center justify-center text-[#FF1A2D] shrink-0 border border-[#333]">
+                          <TicketIcon className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-black text-white uppercase">{tkt.event_title}</h4>
+                          <p className="text-xs text-zinc-400 mt-0.5">{tkt.event_date}</p>
+                          <div className="flex items-center gap-2 mt-1.5">
+                            <span className="text-[10px] font-mono text-zinc-400 bg-[#111] px-2 py-0.5 rounded border border-[#222]">
+                              {tkt.code}
                             </span>
-                          ) : (
-                            <span className="text-[10px] font-bold text-amber-400 bg-amber-950/40 border border-amber-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
-                              <Clock className="w-3 h-3" /> Pendente
-                            </span>
-                          )}
+                            {tkt.status === 'paid' ? (
+                              <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3" /> Confirmado
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-bold text-amber-400 bg-amber-950/40 border border-amber-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                <Clock className="w-3 h-3" /> Pendente
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <button
-                      onClick={() => {
-                        onSelectTicket(tkt);
-                        onNavigate('digital_ticket');
-                      }}
-                      className="bg-[#242424] hover:bg-[#FF1A2D] hover:text-white text-zinc-200 text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl border border-[#333] hover:border-transparent transition flex items-center justify-center gap-1.5"
-                    >
-                      <span>Ver Ingresso</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+                      <button
+                        onClick={() => {
+                          onSelectTicket(tkt);
+                          onNavigate('digital_ticket');
+                        }}
+                        className="bg-[#242424] hover:bg-[#FF1A2D] hover:text-white text-zinc-200 text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl border border-[#333] hover:border-transparent transition flex items-center justify-center gap-1.5"
+                      >
+                        <span>Ver Ingresso</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

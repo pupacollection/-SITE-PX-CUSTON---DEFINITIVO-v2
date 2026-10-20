@@ -13,7 +13,21 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onSelectEvent,
   onNavigate,
 }) => {
-  const nextEvent = events[0];
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const upcomingEvents = events.filter((event) => {
+    const isPublished = !event.status || event.status === 'published';
+    const isOfficial = !event.is_demo && event.is_official !== false;
+    const parsedDate = event.date ? new Date(event.date) : null;
+    const isUpcoming =
+      parsedDate && !isNaN(parsedDate.getTime())
+        ? parsedDate.getTime() >= startOfToday.getTime()
+        : true;
+    return isPublished && isOfficial && isUpcoming;
+  });
+
+  const nextEvent = upcomingEvents[0];
 
   return (
     <div className="min-h-screen bg-[#000000] text-white">
@@ -57,7 +71,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <button
                 onClick={() => {
-                  if (nextEvent) onSelectEvent(nextEvent);
+                  if (nextEvent) {
+                    onSelectEvent(nextEvent);
+                  } else {
+                    onNavigate('events');
+                  }
                 }}
                 className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-sm font-bold uppercase tracking-wider px-7 py-3.5 rounded-xl shadow-[0_0_20px_rgba(255,26,45,0.45)] transition transform hover:-translate-y-0.5 flex items-center gap-2"
               >
@@ -94,7 +112,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               <div className="mt-4 pt-3 border-t border-[#222] flex items-center justify-between text-xs">
                 <span className="text-zinc-400">Ingressos a partir de</span>
                 <span className="text-[#FF1A2D] font-bold text-sm">
-                  R$ {nextEvent.min_price.toFixed(2).replace('.', ',')}
+                  R$ {Number(nextEvent.min_price || 0).toFixed(2).replace('.', ',')}
                 </span>
               </div>
             </div>
@@ -122,67 +140,88 @@ export const HomeView: React.FC<HomeViewProps> = ({
           </button>
         </div>
 
-        {/* 3 Grid Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {events.map((event) => (
-            <div
-              key={event.id}
-              className="bg-[#121212] border border-[#222] hover:border-[#333] rounded-2xl overflow-hidden shadow-xl flex flex-col group transition duration-300"
+        {/* 3 Grid Cards or Official Empty State */}
+        {upcomingEvents.length === 0 ? (
+          <div className="bg-[#121212] border border-[#222] rounded-2xl p-8 sm:p-10 text-center flex flex-col items-center justify-center">
+            <div className="w-12 h-12 rounded-xl bg-[#FF1A2D]/10 border border-[#FF1A2D]/20 text-[#FF1A2D] flex items-center justify-center mb-4">
+              <Calendar className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-black uppercase tracking-tight text-white font-heading">
+              Novos Eventos Oficiais em Breve
+            </h3>
+            <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 max-w-md leading-relaxed">
+              Não há eventos oficiais com venda de ingressos aberta no momento. Acompanhe o calendário para os próximos encontros da PX CUSTON.
+            </p>
+            <button
+              onClick={() => onNavigate('events')}
+              className="mt-5 bg-[#181818] hover:bg-[#222] border border-[#2a2a2a] text-zinc-200 text-xs font-bold uppercase tracking-wider px-5 py-2.5 rounded-xl transition flex items-center gap-2"
             >
-              {/* Event Cover Photo with Badge */}
-              <div className="relative h-48 overflow-hidden">
-                <img
-                  src={event.cover_image}
-                  alt={event.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition duration-500"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-[#121212] via-transparent to-transparent" />
-                
-                {/* Red PX CUSTON badge */}
-                <div className="absolute top-3 left-3 bg-[#FF1A2D] text-white text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded shadow">
-                  PX CUSTON
-                </div>
-
-                <div className="absolute bottom-3 left-3 text-xs font-semibold text-zinc-300 flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5 text-[#FF1A2D]" />
-                  <span>{event.formatted_date}</span>
-                </div>
-              </div>
-
-              {/* Card Body */}
-              <div className="p-5 flex-1 flex flex-col justify-between">
-                <div>
-                  <h3 className="text-lg font-black uppercase tracking-tight text-white group-hover:text-[#FF1A2D] transition">
-                    {event.title}
-                  </h3>
-                  <p className="text-xs text-zinc-400 mt-1 flex items-center gap-1.5">
-                    <MapPin className="w-3.5 h-3.5 text-zinc-500" />
-                    <span>{event.location} • {event.city}/{event.state}</span>
-                  </p>
-                  <p className="text-xs text-zinc-400 mt-3 line-clamp-2 leading-relaxed">
-                    {event.description}
-                  </p>
-                </div>
-
-                <div className="mt-5 pt-4 border-t border-[#1f1f1f] flex items-center justify-between">
-                  <div>
-                    <span className="text-[11px] text-zinc-500 block">A partir de</span>
-                    <span className="text-base font-extrabold text-[#FF1A2D]">
-                      R$ {event.min_price.toFixed(2).replace('.', ',')}
-                    </span>
+              <span>Consultar Agenda</span>
+              <ArrowRight className="w-3.5 h-3.5 text-[#FF1A2D]" />
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {upcomingEvents.map((event) => (
+              <div
+                key={event.id}
+                className="bg-[#121212] border border-[#222] hover:border-[#333] rounded-2xl overflow-hidden shadow-xl flex flex-col group transition duration-300"
+              >
+                {/* Event Cover Photo with Badge */}
+                <div className="relative h-48 overflow-hidden">
+                  <img
+                    src={event.cover_image}
+                    alt={event.title}
+                    className="w-full h-full object-cover group-hover:scale-105 transition duration-500"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#121212] via-transparent to-transparent" />
+                  
+                  {/* Red PX CUSTON badge */}
+                  <div className="absolute top-3 left-3 bg-[#FF1A2D] text-white text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded shadow">
+                    PX CUSTON
                   </div>
 
-                  <button
-                    onClick={() => onSelectEvent(event)}
-                    className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-lg shadow transition"
-                  >
-                    Comprar Ingressos
-                  </button>
+                  <div className="absolute bottom-3 left-3 text-xs font-semibold text-zinc-300 flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                    <span>{event.formatted_date}</span>
+                  </div>
+                </div>
+
+                {/* Card Body */}
+                <div className="p-5 flex-1 flex flex-col justify-between">
+                  <div>
+                    <h3 className="text-lg font-black uppercase tracking-tight text-white group-hover:text-[#FF1A2D] transition">
+                      {event.title}
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-1 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-zinc-500" />
+                      <span>{event.location} • {event.city}/{event.state}</span>
+                    </p>
+                    <p className="text-xs text-zinc-400 mt-3 line-clamp-2 leading-relaxed">
+                      {event.description}
+                    </p>
+                  </div>
+
+                  <div className="mt-5 pt-4 border-t border-[#1f1f1f] flex items-center justify-between">
+                    <div>
+                      <span className="text-[11px] text-zinc-500 block">A partir de</span>
+                      <span className="text-base font-extrabold text-[#FF1A2D]">
+                        R$ {Number(event.min_price || 0).toFixed(2).replace('.', ',')}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => onSelectEvent(event)}
+                      className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-lg shadow transition"
+                    >
+                      Comprar Ingressos
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* 03. BRAND PILLARS & SECURITY */}
