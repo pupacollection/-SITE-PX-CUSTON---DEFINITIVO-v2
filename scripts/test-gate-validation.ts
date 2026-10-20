@@ -9,6 +9,7 @@
 
 import { validateStagingEnvironment, runPostgresHomologationTests } from './test-homologation-postgres';
 import { runRuntimeTests } from './test-api-runtime';
+import { evaluateTicketValidationOutcome } from '../src/lib/ticketValidator';
 
 async function runGateValidationTests() {
   console.log('==============================================================================');
@@ -311,31 +312,183 @@ async function runGateValidationTests() {
   if (test12Ok) passedTests++;
 
   // --------------------------------------------------------------------------
-  // TESTE 13: Falha ao Gravar Auditoria de Check-in (Rollback para 'paid')
-  // Comprova que falha no insert em checkins reverte o ingresso e retorna 500
+  // TESTE 13: Validação Rigorosa da RPC de Check-in (Módulo Real ticketValidator)
+  // Comprova que erro operacional, retorno nulo, arrays, objetos malformados,
+  // ou respostas success=true sem campos obrigatórios resultam estritamente em HTTP 503
+  // e NUNCA acionam operações separadas de escrita/fallback no banco.
   // --------------------------------------------------------------------------
   totalTests++;
-  const simulateCheckinAuditFailure = (ticketUpdated: boolean, auditInsertSuccess: boolean) => {
-    let ticketStatus = ticketUpdated ? 'used' : 'paid';
-    if (!auditInsertSuccess) {
-      // Compensação transacional: reverter ingresso para 'paid'
-      ticketStatus = 'paid';
-      return {
-        statusCode: 500,
-        valid: false,
-        finalTicketStatus: ticketStatus,
-        message: 'Falha operacional ao registrar auditoria de check-in',
-      };
-    }
-    return { statusCode: 200, valid: true, finalTicketStatus: 'used' };
-  };
+  const demoTestMap = new Map<string, any>();
 
-  const checkinAuditSimulation = simulateCheckinAuditFailure(true, false);
-  const test13Ok = checkinAuditSimulation.statusCode === 500 && 
-                   checkinAuditSimulation.valid === false && 
-                   checkinAuditSimulation.finalTicketStatus === 'paid';
-  console.log(`Gate Teste 13 (Compensação de check-in em falha de auditoria): ${test13Ok ? '✅ APROVADO (Status revertido para paid, sem falso sucesso)' : '❌ FALHOU'}`);
+  // 1. Falha operacional na RPC (erro de rede / banco indisponível) -> 503
+  const resRpcErr = evaluateTicketValidationOutcome({
+    rpcResult: null,
+    rpcError: { message: 'Database unreachable' },
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 2. Resultado nulo / ausente -> 503
+  const resNull = evaluateTicketValidationOutcome({
+    rpcResult: null,
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 3. Rejeição de arrays ([]) -> 503
+  const resArray = evaluateTicketValidationOutcome({
+    rpcResult: [{ id: '1' }],
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 4. Rejeição de tipos primitivos (string, number, boolean) -> 503
+  const resPrimitive = evaluateTicketValidationOutcome({
+    rpcResult: 'unexpected_string',
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 5. Rejeição de objeto vazio ({}) -> 503
+  const resEmptyObj = evaluateTicketValidationOutcome({
+    rpcResult: {},
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 6. Rejeição de success=true incompleto sem campos obrigatórios -> 503
+  const resSuccessNoFields = evaluateTicketValidationOutcome({
+    rpcResult: { success: true },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  const resSuccessMissingEventHolder = evaluateTicketValidationOutcome({
+    rpcResult: { success: true, status: 'success', code: 'PX-REAL-1' }, // falta event, holder, batch, timestamp
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  const resSuccessWrongStatus = evaluateTicketValidationOutcome({
+    rpcResult: {
+      success: true,
+      status: 'pending', // inconsistente com success=true
+      code: 'PX-REAL-1',
+      event: 'Mega Encontro',
+      holder: 'Carlos Silva',
+      batch: 'Pista',
+      timestamp: '2026-10-20T10:00:00Z',
+    },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 7. Sucesso oficial completo com contrato integral da procedure SQL -> 200
+  const resValidSuccess = evaluateTicketValidationOutcome({
+    rpcResult: {
+      success: true,
+      status: 'success',
+      code: 'PX-REAL-1',
+      event: 'MEGA ENCONTRO PX CUSTON',
+      holder: 'Carlos Silva',
+      batch: 'Pista Geral',
+      timestamp: '2026-10-20T10:00:00Z',
+    },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 8. Ingresso já utilizado anteriormente -> 409
+  const resAlreadyUsed = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'already_used', message: 'Ingresso já utilizado' },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 9. Status inválido (cancelado, estornado, pendente) -> 400
+  const resInvalidStatus = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'invalid_status', message: 'Ingresso pendente de pagamento' },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 10. Não encontrado em produção (mesmo com código demo) -> 404 estrito (sem bypass)
+  const resNotFoundProd = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'not_found' },
+    rpcError: null,
+    cleanCode: 'PX-7AI89C10',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  // 11. Contingência demo em homologação (1º check-in 200, 2º check-in 409)
+  const demoHmlMap = new Map<string, any>();
+  const resDemoHml1 = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'not_found' },
+    rpcError: null,
+    cleanCode: 'PX-7AI89C10',
+    isProduction: false,
+    demoUsedMap: demoHmlMap,
+  });
+  const resDemoHml2 = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'not_found' },
+    rpcError: null,
+    cleanCode: 'PX-7AI89C10',
+    isProduction: false,
+    demoUsedMap: demoHmlMap,
+  });
+
+  // 12. Status desconhecido retornado pela RPC -> 503
+  const resUnknownStatus = evaluateTicketValidationOutcome({
+    rpcResult: { status: 'status_inedito_do_banco' },
+    rpcError: null,
+    cleanCode: 'PX-REAL-1',
+    isProduction: true,
+    demoUsedMap: demoTestMap,
+  });
+
+  const test13Ok =
+    resRpcErr.statusCode === 503 && resRpcErr.payload.status === 'service_unavailable' &&
+    resNull.statusCode === 503 && resNull.payload.status === 'service_unavailable' &&
+    resArray.statusCode === 503 && resArray.payload.status === 'service_unavailable' &&
+    resPrimitive.statusCode === 503 && resPrimitive.payload.status === 'service_unavailable' &&
+    resEmptyObj.statusCode === 503 && resEmptyObj.payload.status === 'service_unavailable' &&
+    resSuccessNoFields.statusCode === 503 && resSuccessNoFields.payload.status === 'service_unavailable' &&
+    resSuccessMissingEventHolder.statusCode === 503 && resSuccessMissingEventHolder.payload.status === 'service_unavailable' &&
+    resSuccessWrongStatus.statusCode === 503 && resSuccessWrongStatus.payload.status === 'service_unavailable' &&
+    resValidSuccess.statusCode === 200 && resValidSuccess.payload.status === 'success' && resValidSuccess.payload.valid === true &&
+    resAlreadyUsed.statusCode === 409 && resAlreadyUsed.payload.status === 'already_used' &&
+    resInvalidStatus.statusCode === 400 && resInvalidStatus.payload.status === 'invalid_status' &&
+    resNotFoundProd.statusCode === 404 && resNotFoundProd.payload.status === 'not_found' &&
+    resDemoHml1.statusCode === 200 && resDemoHml1.payload.status === 'success' &&
+    resDemoHml2.statusCode === 409 && resDemoHml2.payload.status === 'already_used' &&
+    resUnknownStatus.statusCode === 503 && resUnknownStatus.payload.status === 'service_unavailable';
+
+  console.log(`Gate Teste 13 (Validação rigorosa do contrato real da RPC de check-in): ${test13Ok ? '✅ APROVADO (Arrays, primitivos, payloads incompletos e status anômalos rejeitados com 503)' : '❌ FALHOU'}`);
   if (test13Ok) passedTests++;
+
+
 
   // --------------------------------------------------------------------------
   // TESTE 14: Distinção de Falha de Banco (503) vs Ingresso Inexistente (404) em Produção

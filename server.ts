@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import { validateAndDecodePng } from './src/lib/pngValidator';
+import { evaluateTicketValidationOutcome } from './src/lib/ticketValidator';
 
 dotenv.config();
 
@@ -491,161 +492,36 @@ app.post('/api/tickets/validate', async (req: Request, res: Response) => {
   // Validação e proteção anti-dupla-entrada prosseguem sem bypass.
 
   try {
-    // 1. Tentar validação atômica via stored procedure com bloqueio FOR UPDATE (Anti-Concorrência)
+    // 1. Validação atômica oficial via Stored Procedure com bloqueio FOR UPDATE (Anti-Concorrência & Transacional)
     const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('validate_and_checkin_ticket', {
       p_code: cleanCode,
       p_operator_id: operator_id || null,
       p_device_id: device_id || 'web-scanner',
     });
 
-    if (!rpcError && rpcResult) {
-      if (rpcResult.success) {
-        return res.json({
-          valid: true,
-          code: rpcResult.code,
-          event: rpcResult.event,
-          holder: rpcResult.holder,
-          batch: rpcResult.batch,
-          status: 'success',
-          timestamp: rpcResult.timestamp,
-        });
-      } else if (rpcResult.status === 'already_used') {
-        return res.status(409).json({
-          valid: false,
-          code: cleanCode,
-          status: 'already_used',
-          message: rpcResult.message,
-          holder: rpcResult.holder,
-        });
-      } else if (rpcResult.status === 'invalid_status') {
-        return res.status(400).json({
-          valid: false,
-          code: cleanCode,
-          status: rpcResult.status,
-          message: rpcResult.message,
-          holder: rpcResult.holder,
-        });
-      }
-      // Se não encontrado na tabela de ingressos emitidos, prossegue para homologação de ingressos demo
-    }
+    // 2. Validação estrita do payload (arrays, tipos primitivos, campos obrigatórios e mapeamento de status)
+    const outcome = evaluateTicketValidationOutcome({
+      rpcResult,
+      rpcError,
+      cleanCode,
+      isProduction: isProductionEnvironment(),
+      demoUsedMap: demoUsedTickets,
+      operatorId: operator_id,
+      deviceId: device_id,
+    });
 
-    // 2. Fallback atômico: Update com verificação de status 'paid' direto no banco
-    const checkinTime = new Date().toISOString();
-    const { data: updatedTickets, error: updateError } = await supabaseAdmin
-      .from('tickets')
-      .update({
-        status: 'used',
-        checkin_at: checkinTime,
-        checkin_device_id: device_id || 'web-scanner',
-      })
-      .eq('code', cleanCode)
-      .eq('status', 'paid')
-      .select('*, events(title), ticket_batches(name)');
-
-    if (!updateError && updatedTickets && updatedTickets.length > 0) {
-      const ticket = updatedTickets[0];
-      // Gravar registro na tabela checkins para integridade e auditoria
-      const { error: checkinInsertError } = await supabaseAdmin.from('checkins').insert({
-        ticket_id: ticket.id,
-        event_id: ticket.event_id,
-        operator_id: operator_id || null,
-        device_id: device_id || 'web-scanner',
-        status: 'success',
-        created_at: checkinTime,
-      });
-
-      if (checkinInsertError) {
-        // Se a gravação da auditoria falhar, reverter status do ingresso para 'paid' para evitar falso sucesso ou registro fantasma
-        await supabaseAdmin.from('tickets').update({ status: 'paid', checkin_at: null, checkin_device_id: null }).eq('id', ticket.id);
-        return res.status(500).json({
-          valid: false,
-          code: cleanCode,
-          status: 'error',
-          message: 'Falha operacional ao registrar auditoria de check-in. O ingresso não foi consumido e permanece válido.',
-        });
-      }
-
-      return res.json({
-        valid: true,
-        code: cleanCode,
-        event: ticket.events?.title || 'PX CUSTON',
-        holder: ticket.holder_name,
-        batch: ticket.ticket_batches?.name || 'Geral',
-        status: 'success',
-        timestamp: checkinTime,
-      });
-    }
-
-    // Se já estava usado:
-    const { data: usedTicket } = await supabaseAdmin
-      .from('tickets')
-      .select('status, holder_name, checkin_at')
-      .eq('code', cleanCode)
-      .maybeSingle();
-
-    if (usedTicket?.status === 'used') {
-      return res.status(409).json({
-        valid: false,
-        code: cleanCode,
-        status: 'already_used',
-        message: `ALERTA: Ingresso ${cleanCode} já foi utilizado anteriormente!`,
-        holder: usedTicket.holder_name,
-      });
-    }
+    return res.status(outcome.statusCode).json(outcome.payload);
   } catch (err: any) {
-    console.warn('[Check-in API] Erro operacional no banco de dados:', err?.message || err);
-    // Em produção, falha de banco deve retornar erro operacional 503, distinguindo de ingresso inexistente (404)
-    if (isProductionEnvironment()) {
-      return res.status(503).json({
-        valid: false,
-        code: cleanCode,
-        status: 'service_unavailable',
-        message: 'Serviço de validação temporariamente indisponível devido a falha operacional no banco de dados. Tente novamente.',
-      });
-    }
-  }
-
-  // 3. Validação contra lista autorizada de demonstração (Exclusiva para desenvolvimento / testes)
-  // Em PRODUÇÃO, nenhum código demo é aceito fora do banco de dados oficial. Ingressos não encontrados retornam 404.
-  if (!isProductionEnvironment() && (cleanCode === 'PX-7AI89C10' || cleanCode === 'PX-4M29L8X1')) {
-    const alreadyUsed = demoUsedTickets.get(cleanCode);
-    if (alreadyUsed) {
-      return res.status(409).json({
-        valid: false,
-        code: cleanCode,
-        status: 'already_used',
-        message: `ALERTA: Ingresso ${cleanCode} já foi utilizado anteriormente nesta sessão!`,
-        holder: 'Deivid J. Silva',
-      });
-    }
-
-    const checkinTime = new Date().toISOString();
-    demoUsedTickets.set(cleanCode, {
-      checkin_at: checkinTime,
-      operator: operator_id || 'Operador',
-      device: device_id || 'web-scanner',
-    });
-
-    const isMega = cleanCode === 'PX-7AI89C10';
-    return res.json({
-      valid: true,
+    console.warn('[Check-in API] Exceção operacional no banco de dados:', err?.message || err);
+    return res.status(503).json({
+      valid: false,
       code: cleanCode,
-      event: isMega ? 'MEGA ENCONTRO PX CUSTON [DEMO]' : 'RACHA DE SOM [DEMO]',
-      holder: 'Deivid J. Silva',
-      batch: isMega ? 'Pista (Entrada Geral)' : 'Pista Geral',
-      status: 'success',
-      timestamp: checkinTime,
+      status: 'service_unavailable',
+      message: 'Serviço de validação temporariamente indisponível devido a falha operacional no banco de dados. Tente novamente.',
     });
   }
-
-  // Qualquer código fictício arbitrário é REJEITADO
-  return res.status(404).json({
-    valid: false,
-    code: cleanCode,
-    status: 'invalid',
-    message: `Ingresso "${cleanCode}" inexistente ou não emitido pela plataforma oficial PX CUSTON.`,
-  });
 });
+
 
 // Admin Route: Redefinição controlada de estado de demonstração (Isolado para desenvolvimento/testes)
 // DESATIVADO categoricamente em produção e protegido por autorização administrativa / segredo forte do servidor
