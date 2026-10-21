@@ -62,8 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
           aria-label="PX CUSTON — Ir para o Início"
           className="cursor-pointer flex items-center gap-2 group py-1 shrink-0 focus:outline-none"
         >
-          <PxLogo size="sm" className="sm:hidden" />
-          <PxLogo size="md" className="hidden sm:inline-flex" />
+          <PxLogo size="sm" className="sm:[&_svg]:h-11" />
         </button>
 
         {/* Desktop Navigation Links */}
