@@ -1,6 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  evaluateUserRoleChangePolicy,
+  getRoleManagementPermissions,
+  mergeAuthUserMetadata,
+} from '../src/lib/userRoleValidator';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +96,135 @@ async function runSecurityAuditTests() {
   assert(!serverCode.includes('sb_secret_p2TgOU'), 'server.ts não contém fallback de chave secreta gravado em código');
   assert(serverCode.includes('req.userRole = profile?.role || \'USER\''), 'server.ts não aceita user_metadata do cliente como papel administrativo');
   assert(serverCode.includes('crypto.timingSafeEqual'), 'server.ts utiliza crypto.timingSafeEqual para comparação segura de tokens');
+
+  // TESTE 8: Gestão de Usuários & Hierarquia RBAC (PX CONTROL)
+  console.log('\n7️⃣ Testando Gestão de Usuários, Hierarquia RBAC e Preservação de Metadados...');
+  const adminDashboardPath = path.resolve(__dirname, '../src/views/AdminDashboardView.tsx');
+  const adminDashboardCode = fs.readFileSync(adminDashboardPath, 'utf8');
+  assert(!adminDashboardCode.includes('Módulo em implementação'), 'AdminDashboardView.tsx não exibe mais placeholder "Módulo em implementação"');
+  assert(!adminDashboardCode.includes('CHECKIN_OPERATOR, CLIENT'), 'AdminDashboardView.tsx não referencia o papel inexistente CLIENT');
+  assert(adminDashboardCode.includes('AdminUsersManager'), 'AdminDashboardView.tsx renderiza o componente real AdminUsersManager');
+  assert(serverCode.includes("'/api/admin/users'") && serverCode.includes("'/api/admin/users/:id/role'"), 'server.ts expõe rotas autenticadas /api/admin/users e /api/admin/users/:id/role');
+  assert(serverCode.includes('mergeAuthUserMetadata'), 'server.ts preserva user_metadata existente ao sincronizar role no Supabase Auth');
+
+  const actorSuperId = '11111111-1111-4111-8111-111111111111';
+  const actorAdminId = '22222222-2222-4222-8222-222222222222';
+  const targetUserId = '33333333-3333-4333-8333-333333333333';
+  const targetAdminId = '44444444-4444-4444-8444-444444444444';
+
+  // 8.1 Rejeição do papel inválido CLIENT (400)
+  const resInvalidClientRole = evaluateUserRoleChangePolicy({
+    actorUserId: actorSuperId,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId,
+    targetCurrentRole: 'USER',
+    newRole: 'CLIENT',
+  });
+  assert(!resInvalidClientRole.allowed && resInvalidClientRole.statusCode === 400, 'Rejeita papel inexistente CLIENT com HTTP 400');
+
+  // 8.2 Bloqueio de auto-alteração de papel (403)
+  const resSelfChange = evaluateUserRoleChangePolicy({
+    actorUserId: actorSuperId,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId: actorSuperId,
+    targetCurrentRole: 'SUPER_ADMIN',
+    newRole: 'ADMIN',
+    otherSuperAdminsCount: 2,
+  });
+  assert(!resSelfChange.allowed && resSelfChange.statusCode === 403, 'Bloqueia auto-alteração de papel pelo próprio administrador (HTTP 403)');
+
+  // 8.3 ADMIN pode promover USER para CHECKIN_OPERATOR (200)
+  const resAdminToOperator = evaluateUserRoleChangePolicy({
+    actorUserId: actorAdminId,
+    actorRole: 'ADMIN',
+    targetUserId,
+    targetCurrentRole: 'USER',
+    newRole: 'CHECKIN_OPERATOR',
+  });
+  assert(resAdminToOperator.allowed && resAdminToOperator.statusCode === 200, 'ADMIN pode atribuir CHECKIN_OPERATOR a um USER (HTTP 200)');
+
+  // 8.4 ADMIN NÃO pode promover ninguém para ADMIN ou SUPER_ADMIN (403)
+  const resAdminPromoteAdmin = evaluateUserRoleChangePolicy({
+    actorUserId: actorAdminId,
+    actorRole: 'ADMIN',
+    targetUserId,
+    targetCurrentRole: 'USER',
+    newRole: 'ADMIN',
+  });
+  const resAdminPromoteSuper = evaluateUserRoleChangePolicy({
+    actorUserId: actorAdminId,
+    actorRole: 'ADMIN',
+    targetUserId,
+    targetCurrentRole: 'USER',
+    newRole: 'SUPER_ADMIN',
+  });
+  assert(
+    !resAdminPromoteAdmin.allowed && resAdminPromoteAdmin.statusCode === 403 &&
+    !resAdminPromoteSuper.allowed && resAdminPromoteSuper.statusCode === 403,
+    'ADMIN é bloqueado ao tentar conceder ADMIN ou SUPER_ADMIN (HTTP 403)'
+  );
+
+  // 8.5 ADMIN NÃO pode modificar outro ADMIN ou SUPER_ADMIN (403)
+  const resAdminModifyOtherAdmin = evaluateUserRoleChangePolicy({
+    actorUserId: actorAdminId,
+    actorRole: 'ADMIN',
+    targetUserId: targetAdminId,
+    targetCurrentRole: 'ADMIN',
+    newRole: 'USER',
+  });
+  assert(!resAdminModifyOtherAdmin.allowed && resAdminModifyOtherAdmin.statusCode === 403, 'ADMIN é bloqueado ao tentar alterar outro ADMIN ou SUPER_ADMIN (HTTP 403)');
+
+  // 8.6 Proteção do último SUPER_ADMIN ativo (403 quando otherSuperAdminsCount = 0; 200 quando >= 1)
+  const resLastSuperDemote = evaluateUserRoleChangePolicy({
+    actorUserId: actorSuperId,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId: targetAdminId,
+    targetCurrentRole: 'SUPER_ADMIN',
+    newRole: 'ADMIN',
+    otherSuperAdminsCount: 0,
+  });
+  const resMultipleSuperDemote = evaluateUserRoleChangePolicy({
+    actorUserId: actorSuperId,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId: targetAdminId,
+    targetCurrentRole: 'SUPER_ADMIN',
+    newRole: 'ADMIN',
+    otherSuperAdminsCount: 1,
+  });
+  assert(
+    !resLastSuperDemote.allowed && resLastSuperDemote.statusCode === 403 &&
+    resMultipleSuperDemote.allowed && resMultipleSuperDemote.statusCode === 200,
+    'Protege o último SUPER_ADMIN contra rebaixamento (HTTP 403) e permite quando há outro SUPER_ADMIN ativo (HTTP 200)'
+  );
+
+  // 8.7 Preservação de user_metadata existente
+  const mergedMeta = mergeAuthUserMetadata(
+    { full_name: 'Piloto PX', phone: '33999999999', cpf: '12345678901', role: 'USER' },
+    'CHECKIN_OPERATOR'
+  );
+  assert(
+    mergedMeta.full_name === 'Piloto PX' &&
+    mergedMeta.phone === '33999999999' &&
+    mergedMeta.cpf === '12345678901' &&
+    mergedMeta.role === 'CHECKIN_OPERATOR',
+    'mergeAuthUserMetadata preserva full_name, phone e cpf intactos ao atualizar role'
+  );
+
+  // 8.8 Permissões de UI consistentes com o backend
+  const uiPermsAdminOnUser = getRoleManagementPermissions({
+    callerId: actorAdminId,
+    callerRole: 'ADMIN',
+    targetId: targetUserId,
+    targetRole: 'USER',
+    superAdminCount: 1,
+  });
+  assert(
+    uiPermsAdminOnUser.canEdit &&
+    uiPermsAdminOnUser.allowedRoles.length === 2 &&
+    uiPermsAdminOnUser.allowedRoles.includes('USER') &&
+    uiPermsAdminOnUser.allowedRoles.includes('CHECKIN_OPERATOR'),
+    'UI restringe seletor de ADMIN apenas a USER e CHECKIN_OPERATOR'
+  );
 
   console.log(`\n========================================`);
   console.log(`📊 Resultado dos Testes: ${passedTests}/${totalTests} aprovados!`);

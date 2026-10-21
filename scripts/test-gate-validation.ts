@@ -10,6 +10,7 @@
 import { validateStagingEnvironment, runPostgresHomologationTests } from './test-homologation-postgres';
 import { runRuntimeTests } from './test-api-runtime';
 import { evaluateTicketValidationOutcome } from '../src/lib/ticketValidator';
+import { evaluateUserRoleChangePolicy, mergeAuthUserMetadata } from '../src/lib/userRoleValidator';
 
 async function runGateValidationTests() {
   console.log('==============================================================================');
@@ -197,6 +198,9 @@ async function runGateValidationTests() {
     if (options.path?.includes('/status')) return { statusCode: 404, data: { error: 'Não encontrado' } };
     if (options.path === '/api/payments/webhook') return { statusCode: 200, data: { received: true } };
     if (options.path === '/api/admin/orders/expire-pending') return { statusCode: 401, data: { error: 'Não autorizado' } };
+    if (options.path === '/api/admin/users' || options.path?.includes('/api/admin/users/') || options.path === '/api/admin/promote-user') {
+      return { statusCode: 401, data: { error: 'Token de autenticação não fornecido ou inválido.' } };
+    }
     if (options.path === '/api/orders/create') return { statusCode: 503, data: { error: 'RPC Indisponível' } };
     return { statusCode: 200, data: { valid: true, code: 'PX-4M29L8X1' } };
   };
@@ -518,6 +522,41 @@ async function runGateValidationTests() {
 
   console.log(`Gate Teste 14 (Distinção de 503 Banco vs 404 Inexistente em produção): ${test14Ok ? '✅ APROVADO (Falha de banco gera 503 e demo em prod gera 404)' : '❌ FALHOU'}`);
   if (test14Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 15: Matriz Completa de Hierarquia RBAC e Gestão de Usuários (userRoleValidator)
+  // --------------------------------------------------------------------------
+  totalTests++;
+  const superId = '11111111-1111-4111-8111-111111111111';
+  const adminId = '22222222-2222-4222-8222-222222222222';
+  const opId = '33333333-3333-4333-8333-333333333333';
+  const userId = '44444444-4444-4444-8444-444444444444';
+
+  const r1 = evaluateUserRoleChangePolicy({ actorUserId: superId, actorRole: 'SUPER_ADMIN', targetUserId: userId, targetCurrentRole: 'USER', newRole: 'CLIENT' });
+  const r2 = evaluateUserRoleChangePolicy({ actorUserId: opId, actorRole: 'CHECKIN_OPERATOR', targetUserId: userId, targetCurrentRole: 'USER', newRole: 'CHECKIN_OPERATOR' });
+  const r3 = evaluateUserRoleChangePolicy({ actorUserId: adminId, actorRole: 'ADMIN', targetUserId: adminId, targetCurrentRole: 'ADMIN', newRole: 'USER' });
+  const r4 = evaluateUserRoleChangePolicy({ actorUserId: adminId, actorRole: 'ADMIN', targetUserId: userId, targetCurrentRole: 'USER', newRole: 'ADMIN' });
+  const r5 = evaluateUserRoleChangePolicy({ actorUserId: adminId, actorRole: 'ADMIN', targetUserId: superId, targetCurrentRole: 'SUPER_ADMIN', newRole: 'CHECKIN_OPERATOR' });
+  const r6 = evaluateUserRoleChangePolicy({ actorUserId: adminId, actorRole: 'ADMIN', targetUserId: userId, targetCurrentRole: 'USER', newRole: 'CHECKIN_OPERATOR' });
+  const r7 = evaluateUserRoleChangePolicy({ actorUserId: superId, actorRole: 'SUPER_ADMIN', targetUserId: adminId, targetCurrentRole: 'SUPER_ADMIN', newRole: 'ADMIN', otherSuperAdminsCount: 0 });
+  const r8 = evaluateUserRoleChangePolicy({ actorUserId: superId, actorRole: 'SUPER_ADMIN', targetUserId: userId, targetCurrentRole: 'USER', newRole: 'ADMIN' });
+  const mergedMeta = mergeAuthUserMetadata({ full_name: 'Admin PX', cpf: '00011122233', role: 'USER' }, 'ADMIN');
+
+  const test15Ok =
+    r1.statusCode === 400 && !r1.allowed &&
+    r2.statusCode === 403 && !r2.allowed &&
+    r3.statusCode === 403 && !r3.allowed &&
+    r4.statusCode === 403 && !r4.allowed &&
+    r5.statusCode === 403 && !r5.allowed &&
+    r6.statusCode === 200 && r6.allowed &&
+    r7.statusCode === 403 && !r7.allowed &&
+    r8.statusCode === 200 && r8.allowed &&
+    mergedMeta.full_name === 'Admin PX' &&
+    mergedMeta.cpf === '00011122233' &&
+    mergedMeta.role === 'ADMIN';
+
+  console.log(`Gate Teste 15 (Matriz de Segurança RBAC e Gestão de Usuários): ${test15Ok ? '✅ APROVADO (Hierarquia ADMIN/SUPER_ADMIN, proteção do último SUPER_ADMIN e preservação de metadados validadas)' : '❌ FALHOU'}`);
+  if (test15Ok) passedTests++;
 
   // Restaurar ambiente original
   if (originalUrl) process.env.STAGING_SUPABASE_URL = originalUrl;

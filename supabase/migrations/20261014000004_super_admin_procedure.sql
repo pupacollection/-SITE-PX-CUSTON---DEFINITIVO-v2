@@ -257,14 +257,16 @@ BEGIN
   END IF;
 
   -- 2. Verificação de permissões do chamador com negação explícita de NULL
-  IF current_setting('role', true) IS DISTINCT FROM 'service_role' THEN
+  v_actor := COALESCE(auth.uid(), NULLIF(current_setting('px.actor_id', true), '')::UUID);
+
+  IF current_setting('role', true) IS DISTINCT FROM 'service_role' OR v_actor IS NOT NULL THEN
     -- Exigir usuário autenticado
-    IF auth.uid() IS NULL THEN
+    IF v_actor IS NULL THEN
       RAISE EXCEPTION 'Acesso negado: Usuário solicitante não autenticado.';
     END IF;
 
     -- Consultar perfil do solicitante
-    SELECT role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
+    SELECT role INTO v_caller_role FROM public.profiles WHERE id = v_actor;
 
     -- Negar explicitamente usuários sem perfil
     IF v_caller_role IS NULL THEN
@@ -277,13 +279,9 @@ BEGIN
     END IF;
 
     -- Impedir que qualquer administrador altere o seu próprio papel
-    IF target_user_id = auth.uid() THEN
+    IF target_user_id = v_actor THEN
       RAISE EXCEPTION 'Acesso negado: Usuários administrativos não podem alterar os seus próprios privilégios de acesso.';
     END IF;
-
-    v_actor := auth.uid();
-  ELSE
-    v_actor := NULL;
   END IF;
 
   -- 3. Localização e validação do usuário alvo
@@ -294,7 +292,7 @@ BEGIN
   END IF;
 
   -- 4. Regras estritas de hierarquia para papel ADMIN (não SUPER_ADMIN)
-  IF current_setting('role', true) IS DISTINCT FROM 'service_role' AND v_caller_role = 'ADMIN' THEN
+  IF v_caller_role = 'ADMIN' THEN
     -- Administrador comum NÃO pode conceder ADMIN ou SUPER_ADMIN
     IF new_role IN ('ADMIN', 'SUPER_ADMIN') THEN
       RAISE EXCEPTION 'Acesso negado: Apenas um SUPER_ADMIN pode conceder os papéis ADMIN ou SUPER_ADMIN.';

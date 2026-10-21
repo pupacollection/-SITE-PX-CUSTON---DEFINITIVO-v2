@@ -569,6 +569,7 @@ export default function App() {
               {currentScreen === 'admin_dashboard' && (
                 <AdminDashboardView
                   events={events}
+                  currentUser={user}
                   onNavigate={handleNavigate}
                   onRefreshEvents={fetchEventsFromDatabase}
                 />

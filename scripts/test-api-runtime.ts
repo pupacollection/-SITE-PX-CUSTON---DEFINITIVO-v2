@@ -483,6 +483,62 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
+  // Cenário 19: Proteção RBAC em GET /api/admin/users sem token retorna 401
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    19,
+    'Proteção RBAC na listagem administrativa de usuários (GET /api/admin/users sem token)',
+    401,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/users',
+      method: 'GET',
+    }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 20: Proteção RBAC em PATCH /api/admin/users/:id/role sem token retorna 401
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    20,
+    'Proteção RBAC na alteração de papel (PATCH /api/admin/users/:id/role sem token)',
+    401,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/users/11111111-1111-4111-8111-111111111111/role',
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+    }, { new_role: 'ADMIN' }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 21: Proteção RBAC em POST /api/admin/promote-user com token inválido retorna 401
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    21,
+    'Proteção RBAC em POST /api/admin/promote-user com sessão inválida',
+    401,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/promote-user',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer token_jwt_invalido_nao_autenticado',
+      },
+    }, {
+      target_user_id: '11111111-1111-4111-8111-111111111111',
+      new_role: 'SUPER_ADMIN',
+    }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
   // Teardown: Limpeza final de estado via rota administrativa autorizada
   // --------------------------------------------------------------------------
   try {
@@ -514,7 +570,7 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   // --------------------------------------------------------------------------
   // Avaliação Final do Gate
   // --------------------------------------------------------------------------
-  const totalScenarios = 18;
+  const totalScenarios = 21;
   const allPassed = failedCount === 0 && passedCount === totalScenarios;
   console.log('\n==============================================================================');
   if (allPassed) {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { ActiveScreen, EventItem, Order } from '../types';
+import { ActiveScreen, EventItem, Order, UserProfile } from '../types';
 import { supabase } from '../lib/supabase';
 import {
   LayoutDashboard,
@@ -25,9 +25,11 @@ import {
 import { AdminEventsManager } from '../components/admin/AdminEventsManager';
 import { AdminBrandingManager } from '../components/admin/AdminBrandingManager';
 import { AdminBatchesManager } from '../components/admin/AdminBatchesManager';
+import { AdminUsersManager } from '../components/admin/AdminUsersManager';
 
 interface AdminDashboardViewProps {
   events: EventItem[];
+  currentUser?: UserProfile | null;
   onNavigate: (screen: ActiveScreen) => void;
   onRefreshEvents?: () => void;
 }
@@ -47,6 +49,7 @@ interface AdminOrderRow {
 
 export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   events,
+  currentUser,
   onNavigate,
   onRefreshEvents,
 }) => {
@@ -858,68 +861,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           />
         )}
 
-        {/* SEÇÃO 5: GESTÃO DE USUÁRIOS */}
+        {/* SEÇÃO 5: GESTÃO DE USUÁRIOS & RBAC */}
         {adminTab === 'users' && (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1c1c1c] pb-6">
-              <div>
-                <h1 className="text-2xl font-black uppercase tracking-tight text-white font-heading">
-                  Gestão de Usuários
-                </h1>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Auditoria de perfis e níveis de permissão (RBAC) no sistema
-                </p>
-              </div>
-            </div>
-
-            {/* Banner de Módulo em Implementação */}
-            <div className="bg-[#141414] border border-amber-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="p-3 bg-amber-500/10 rounded-xl text-amber-400 shrink-0">
-                <Users className="w-6 h-6" />
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
-                    Módulo em implementação
-                  </span>
-                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono">
-                    Fase de Estruturação
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-300 leading-relaxed">
-                  O módulo de atribuição de papéis (RBAC) e gerenciamento de permissões pelo PX CONTROL está em fase de estruturação.
-                  Atualmente, as permissões são validadas estritamente via Row Level Security (RLS) e regras de banco no Supabase.
-                </p>
-              </div>
-            </div>
-
-            {/* Resumo de Usuários no Banco Oficial */}
-            <div className="bg-[#121212] border border-[#222] rounded-2xl p-6 space-y-4">
-              <h3 className="text-sm font-bold text-white uppercase tracking-wider font-heading">
-                Status de Autenticação e Perfis (Supabase)
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
-                  <span className="text-xs text-zinc-400 block mb-1">Perfis Registrados</span>
-                  <span className="text-xl font-bold font-mono text-white">
-                    {profilesCount !== null ? profilesCount : 'Consultando...'}
-                  </span>
-                </div>
-                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
-                  <span className="text-xs text-zinc-400 block mb-1">Níveis de Permissão</span>
-                  <span className="text-xs font-mono text-zinc-300 block">
-                    SUPER_ADMIN, ADMIN, CHECKIN_OPERATOR, CLIENT
-                  </span>
-                </div>
-                <div className="bg-[#181818] border border-[#262626] p-4 rounded-xl">
-                  <span className="text-xs text-zinc-400 block mb-1">Segurança Ativa</span>
-                  <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Supabase Auth + RLS
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
+          <AdminUsersManager
+            currentUser={currentUser}
+            onUserCountChange={(count) => setProfilesCount(count)}
+          />
         )}
 
         {/* SEÇÃO 6: IDENTIDADE VISUAL & ÍCONE PWA */}

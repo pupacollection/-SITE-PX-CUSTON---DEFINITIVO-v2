@@ -9,6 +9,13 @@ import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import { validateAndDecodePng } from './src/lib/pngValidator';
 import { evaluateTicketValidationOutcome } from './src/lib/ticketValidator';
+import {
+  evaluateUserRoleChangePolicy,
+  isValidUserRole,
+  isValidUuid,
+  mergeAuthUserMetadata,
+  VALID_USER_ROLES,
+} from './src/lib/userRoleValidator';
 
 dotenv.config();
 
@@ -780,41 +787,367 @@ app.post('/api/admin/init-super-admin', async (req: Request, res: Response) => {
   }
 });
 
-// Admin Route: Alteração de Papel por um SUPER_ADMIN autenticado
-app.post('/api/admin/promote-user', requireAuth, requireRole(['SUPER_ADMIN']), async (req: AuthenticatedRequest, res: Response) => {
-  const { target_user_id, new_role } = req.body;
-  const validRoles = ['USER', 'CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'];
+// ==========================================
+// ADMIN USER MANAGEMENT & RBAC (PX CONTROL)
+// ==========================================
 
-  if (!target_user_id || !validRoles.includes(new_role)) {
-    return res.status(400).json({ error: 'target_user_id ou new_role inválido.' });
+// Admin Route: Listagem real de usuários e perfis em public.profiles com busca, filtro, paginação e resumo
+app.get(
+  '/api/admin/users',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+      const rawRole = typeof req.query.role === 'string' ? req.query.role.trim().toUpperCase() : 'ALL';
+      const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '25'), 10) || 25));
+
+      if (rawRole !== 'ALL' && !isValidUserRole(rawRole)) {
+        return res.status(400).json({
+          error: `Filtro de papel inválido (${rawRole}). Os únicos papéis oficiais são: ${VALID_USER_ROLES.join(', ')}.`,
+        });
+      }
+
+      // 1. Consultar todos os perfis oficiais em public.profiles para estatísticas e filtragem precisa
+      const { data: allProfiles, error: profilesError } = await supabaseAdmin
+        .from('profiles')
+        .select('id, email, full_name, phone, cpf, avatar_url, role, is_verified, created_at, updated_at')
+        .order('created_at', { ascending: false });
+
+      if (profilesError) {
+        console.error('[PX CONTROL Users] Erro ao consultar public.profiles:', profilesError.message);
+        return res.status(503).json({
+          error: 'Não foi possível consultar a lista de usuários no banco de dados oficial.',
+          details: profilesError.message,
+        });
+      }
+
+      const profilesList = Array.isArray(allProfiles) ? allProfiles : [];
+
+      // 2. Resumo real de papéis no banco
+      const summary = {
+        total: profilesList.length,
+        super_admins: profilesList.filter((p) => p.role === 'SUPER_ADMIN').length,
+        admins: profilesList.filter((p) => p.role === 'ADMIN').length,
+        operators: profilesList.filter((p) => p.role === 'CHECKIN_OPERATOR').length,
+        users: profilesList.filter((p) => p.role === 'USER').length,
+      };
+
+      // 3. Aplicar filtro de papel e busca textual (nome, e-mail, CPF)
+      const searchLower = rawSearch.toLowerCase();
+      const filteredProfiles = profilesList.filter((p) => {
+        if (rawRole !== 'ALL' && p.role !== rawRole) {
+          return false;
+        }
+        if (searchLower.length > 0) {
+          const matchName = String(p.full_name || '').toLowerCase().includes(searchLower);
+          const matchEmail = String(p.email || '').toLowerCase().includes(searchLower);
+          const matchCpf = String(p.cpf || '').toLowerCase().includes(searchLower);
+          const matchId = String(p.id || '').toLowerCase().includes(searchLower);
+          return matchName || matchEmail || matchCpf || matchId;
+        }
+        return true;
+      });
+
+      const totalFiltered = filteredProfiles.length;
+      const totalPages = Math.max(1, Math.ceil(totalFiltered / limit));
+      const safePage = Math.min(page, totalPages);
+      const offset = (safePage - 1) * limit;
+      const paginatedUsers = filteredProfiles.slice(offset, offset + limit);
+
+      // 4. Consultar histórico recente de auditoria de papéis (se disponível)
+      let recentAuditLogs: any[] = [];
+      try {
+        const { data: logs } = await supabaseAdmin
+          .from('audit_logs')
+          .select('id, actor_id, action, entity, entity_id, details, created_at')
+          .eq('entity', 'profiles')
+          .in('action', ['ROLE_CHANGED', 'ROLE_PROMOTED', 'FIRST_SUPER_ADMIN_PROMOTED'])
+          .order('created_at', { ascending: false })
+          .limit(15);
+
+        if (Array.isArray(logs)) {
+          recentAuditLogs = logs;
+        }
+      } catch {
+        // Tolerante caso audit_logs esteja vazio ou inacessível
+      }
+
+      return res.json({
+        users: paginatedUsers,
+        pagination: {
+          page: safePage,
+          limit,
+          total: totalFiltered,
+          totalPages,
+        },
+        summary,
+        audit_logs: recentAuditLogs,
+        caller: {
+          id: req.user.id,
+          email: req.user.email,
+          role: req.userRole,
+        },
+      });
+    } catch (err: any) {
+      console.error('[PX CONTROL Users] Exceção ao listar usuários:', err);
+      return res.status(500).json({
+        error: 'Falha interna ao carregar a gestão de usuários.',
+      });
+    }
+  }
+);
+
+// Handler centralizado e seguro para alteração de papel de usuário (RBAC)
+const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Response) => {
+  const targetUserId = String(req.params.id || req.body?.target_user_id || req.body?.user_id || '').trim();
+  const newRole = typeof (req.body?.new_role ?? req.body?.role) === 'string'
+    ? String(req.body?.new_role ?? req.body?.role).trim().toUpperCase()
+    : req.body?.new_role ?? req.body?.role;
+
+  // 1. Validação sintática imediata de UUID e enum oficial de papel (rejeita CLIENT e valores arbitrários com 400)
+  if (!isValidUuid(targetUserId)) {
+    return res.status(400).json({
+      error: 'Parâmetro inválido: O identificador do usuário alvo (target_user_id) deve ser um UUID válido.',
+      code: 'INVALID_TARGET_ID',
+    });
+  }
+
+  if (!isValidUserRole(newRole)) {
+    return res.status(400).json({
+      error: `Papel inválido (${String(newRole)}). Os únicos papéis oficiais permitidos são: ${VALID_USER_ROLES.join(', ')}.`,
+      code: 'INVALID_ROLE',
+    });
+  }
+
+  // 2. Bloqueio imediato de auto-alteração (antes mesmo de ir ao banco)
+  if (req.user?.id && String(req.user.id).toLowerCase() === targetUserId.toLowerCase()) {
+    return res.status(403).json({
+      error: 'Acesso negado: Administradores não podem alterar o próprio nível de permissão.',
+      code: 'SELF_ROLE_CHANGE_FORBIDDEN',
+    });
   }
 
   try {
-    // Atualizar no Supabase Auth
-    await supabaseAdmin.auth.admin.updateUserById(target_user_id, {
-      user_metadata: { role: new_role },
-    });
-
-    // Atualizar no profiles
-    await supabaseAdmin
+    // 3. Consultar perfil real do usuário alvo em public.profiles
+    const { data: targetProfile, error: targetFetchError } = await supabaseAdmin
       .from('profiles')
-      .update({ role: new_role, updated_at: new Date().toISOString() })
-      .eq('id', target_user_id);
+      .select('id, email, full_name, role')
+      .eq('id', targetUserId)
+      .maybeSingle();
 
-    // Gravar log de auditoria
-    await supabaseAdmin.from('audit_logs').insert({
-      actor_id: req.user.id,
-      action: 'ROLE_PROMOTED',
-      entity: 'profiles',
-      entity_id: target_user_id,
-      details: { new_role, promoted_by: req.user.email },
+    if (targetFetchError) {
+      return res.status(503).json({
+        error: 'Falha ao consultar o perfil do usuário alvo no banco de dados.',
+        details: targetFetchError.message,
+      });
+    }
+
+    if (!targetProfile) {
+      return res.status(404).json({
+        error: 'Usuário alvo não encontrado em public.profiles.',
+        code: 'TARGET_PROFILE_NOT_FOUND',
+      });
+    }
+
+    // 4. Contar outros SUPER_ADMINs ativos se o alvo for atualmente SUPER_ADMIN
+    let otherSuperAdminsCount = 1;
+    if (targetProfile.role === 'SUPER_ADMIN' && newRole !== 'SUPER_ADMIN') {
+      const { count, error: countError } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', 'SUPER_ADMIN')
+        .neq('id', targetUserId);
+
+      if (countError) {
+        return res.status(503).json({
+          error: 'Falha ao verificar a contagem de SUPER_ADMIN ativos para proteção do sistema.',
+        });
+      }
+      otherSuperAdminsCount = count ?? 0;
+    }
+
+    // 5. Avaliar política completa de hierarquia e segurança RBAC
+    const policy = evaluateUserRoleChangePolicy({
+      actorUserId: req.user.id,
+      actorRole: req.userRole || 'USER',
+      targetUserId,
+      targetCurrentRole: targetProfile.role,
+      newRole,
+      otherSuperAdminsCount,
     });
 
-    res.json({ success: true, target_user_id, new_role });
+    if (!policy.allowed) {
+      return res.status(policy.statusCode).json({
+        error: policy.error,
+        code: policy.code,
+      });
+    }
+
+    // Idempotência caso o papel já seja o mesmo
+    if (targetProfile.role === newRole) {
+      return res.json({
+        success: true,
+        unchanged: true,
+        target_user_id: targetUserId,
+        old_role: targetProfile.role,
+        new_role: newRole,
+        user: targetProfile,
+        message: `O usuário já possui o papel ${newRole}.`,
+      });
+    }
+
+    const oldRole = targetProfile.role;
+
+    // 6. Obter metadados atuais do usuário no Supabase Auth para preservá-los integralmente
+    let existingUserMetadata: Record<string, unknown> = {};
+    try {
+      const { data: authUserResult } = await supabaseAdmin.auth.admin.getUserById(targetUserId);
+      if (authUserResult?.user?.user_metadata && typeof authUserResult.user.user_metadata === 'object') {
+        existingUserMetadata = { ...authUserResult.user.user_metadata };
+      }
+    } catch {
+      // Prosseguir com objeto seguro caso o usuário Auth seja consultado apenas na atualização
+    }
+
+    // 7. Executar atualização no PostgreSQL (priorizando a procedure SECURITY DEFINER admin_set_user_role com JWT do administrador)
+    let rpcAuditLogged = false;
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (bearerToken && supabasePublishableKey) {
+      const userScopedClient = createClient(supabaseUrl, supabasePublishableKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${bearerToken}` } },
+      });
+
+      const { data: rpcData, error: rpcErr } = await userScopedClient.rpc('admin_set_user_role', {
+        target_user_id: targetUserId,
+        new_role: newRole,
+      });
+
+      if (rpcErr) {
+        const msg = rpcErr.message || '';
+        if (
+          msg.includes('Acesso negado') ||
+          msg.includes('Ação bloqueada') ||
+          msg.includes('Privilégios insuficientes') ||
+          msg.includes('próprios privilégios')
+        ) {
+          return res.status(403).json({ error: msg });
+        }
+        if (msg.includes('Usuário não encontrado')) {
+          return res.status(404).json({ error: msg });
+        }
+      } else if (rpcData) {
+        rpcAuditLogged = true;
+      }
+    }
+
+    // Se a RPC via cliente autenticado não tiver sido executada (ex: chave anon ausente no servidor), atualizar via supabaseAdmin
+    if (!rpcAuditLogged) {
+      const { data: updatedRows, error: profileUpdateError } = await supabaseAdmin
+        .from('profiles')
+        .update({ role: newRole, updated_at: new Date().toISOString() })
+        .eq('id', targetUserId)
+        .select('id, email, full_name, role, updated_at');
+
+      if (profileUpdateError || !updatedRows || updatedRows.length === 0) {
+        return res.status(500).json({
+          error: 'Falha ao atualizar o papel do usuário na tabela oficial public.profiles.',
+          details: profileUpdateError?.message || 'Nenhum registro atualizado.',
+        });
+      }
+    }
+
+    // 8. Sincronizar user_metadata.role no Supabase Auth preservando todos os campos existentes
+    const mergedMetadata = mergeAuthUserMetadata(existingUserMetadata, newRole);
+    const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(targetUserId, {
+      user_metadata: mergedMetadata,
+    });
+
+    if (authUpdateError) {
+      // Rollback compensatório em public.profiles para evitar divergência entre banco e Auth
+      await supabaseAdmin
+        .from('profiles')
+        .update({ role: oldRole, updated_at: new Date().toISOString() })
+        .eq('id', targetUserId);
+
+      return res.status(502).json({
+        error: 'Falha ao sincronizar metadados no Supabase Auth. A alteração em public.profiles foi revertida automaticamente para manter a consistência.',
+        details: authUpdateError.message,
+      });
+    }
+
+    // 9. Registrar log de auditoria detalhado em public.audit_logs (se ainda não registrado pela RPC)
+    if (!rpcAuditLogged) {
+      try {
+        await supabaseAdmin.from('audit_logs').insert({
+          actor_id: req.user.id,
+          action: 'ROLE_CHANGED',
+          entity: 'profiles',
+          entity_id: targetUserId,
+          details: {
+            old_role: oldRole,
+            new_role: newRole,
+            target_user_id: targetUserId,
+            target_email: targetProfile.email,
+            target_name: targetProfile.full_name,
+            executed_by: req.user.id,
+            executed_by_email: req.user.email,
+            executed_by_role: req.userRole,
+          },
+        });
+      } catch (auditErr) {
+        console.warn('[PX CONTROL Users] Aviso ao gravar log de auditoria complementar:', auditErr);
+      }
+    }
+
+    // 10. Buscar perfil atualizado para retorno canônico
+    const { data: finalProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('id, email, full_name, phone, cpf, avatar_url, role, is_verified, created_at, updated_at')
+      .eq('id', targetUserId)
+      .maybeSingle();
+
+    return res.json({
+      success: true,
+      target_user_id: targetUserId,
+      old_role: oldRole,
+      new_role: newRole,
+      user: finalProfile || { ...targetProfile, role: newRole },
+      message: `Permissão de ${targetProfile.full_name || targetProfile.email} atualizada de ${oldRole} para ${newRole}.`,
+    });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    console.error('[PX CONTROL Users] Exceção ao atualizar papel de usuário:', err);
+    return res.status(500).json({
+      error: err?.message || 'Erro interno ao processar alteração de permissão.',
+    });
   }
-});
+};
+
+// Rotas RESTful oficiais para alteração de papel no PX CONTROL + rota legada compatível
+app.patch(
+  '/api/admin/users/:id/role',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  handleAdminUserRoleUpdate
+);
+
+app.post(
+  '/api/admin/users/:id/role',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  handleAdminUserRoleUpdate
+);
+
+app.post(
+  '/api/admin/promote-user',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  handleAdminUserRoleUpdate
+);
 
 // Admin Route: Métricas gerais para o PX CONTROL Dashboard
 app.get('/api/admin/metrics', requireAuth, requireRole(['ADMIN', 'SUPER_ADMIN']), async (req: AuthenticatedRequest, res: Response) => {
