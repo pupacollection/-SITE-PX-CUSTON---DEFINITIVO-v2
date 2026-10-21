@@ -153,11 +153,12 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-[#000000] text-white py-8 sm:py-10 pb-24 md:pb-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Top bar with Back Button & Breadcrumb */}
         <div className="flex items-center justify-between pb-1">
           <button
+            type="button"
             onClick={onCancel}
             className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-white bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] px-3.5 py-2 rounded-xl transition"
             aria-label="Voltar para a página do evento"
@@ -171,40 +172,40 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         </div>
 
         {/* Stepper (1 Ingressos -> 2 Pagamento -> 3 Confirmação) */}
-        <div className="flex items-center justify-center gap-4 sm:gap-8 border-b border-[#222] pb-6">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold flex items-center justify-center">
+        <div className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-2 sm:gap-6 border-b border-[#222] pb-5">
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold flex items-center justify-center shrink-0">
               ✓
             </div>
-            <span className="text-xs text-zinc-400">1. Ingressos</span>
+            <span className="text-[11px] sm:text-xs text-zinc-400 whitespace-nowrap">1. Ingressos</span>
           </div>
 
-          <div className="w-12 h-px bg-[#FF1A2D]"></div>
+          <div className="w-4 sm:w-12 h-px bg-[#FF1A2D] shrink-0"></div>
 
-          <div className="flex items-center gap-2">
-            <div className={`w-7 h-7 rounded-full text-xs font-bold flex items-center justify-center ${
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className={`w-6 h-6 sm:w-7 sm:h-7 rounded-full text-xs font-bold flex items-center justify-center shrink-0 ${
               registeredOrder
                 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                 : 'bg-[#FF1A2D] text-white shadow-[0_0_10px_rgba(255,26,45,0.6)]'
             }`}>
               {registeredOrder ? '✓' : '2'}
             </div>
-            <span className={`text-xs uppercase tracking-wider ${registeredOrder ? 'text-zinc-400' : 'font-bold text-white'}`}>
+            <span className={`text-[11px] sm:text-xs uppercase tracking-wider whitespace-nowrap ${registeredOrder ? 'text-zinc-400' : 'font-bold text-white'}`}>
               2. Pagamento
             </span>
           </div>
 
-          <div className={`w-12 h-px ${registeredOrder ? 'bg-[#FF1A2D]' : 'bg-[#262626]'}`}></div>
+          <div className={`w-4 sm:w-12 h-px shrink-0 ${registeredOrder ? 'bg-[#FF1A2D]' : 'bg-[#262626]'}`}></div>
 
-          <div className="flex items-center gap-2">
-            <div className={`w-7 h-7 rounded-full text-xs font-bold flex items-center justify-center ${
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className={`w-6 h-6 sm:w-7 sm:h-7 rounded-full text-xs font-bold flex items-center justify-center shrink-0 ${
               registeredOrder
                 ? 'bg-[#FF1A2D] text-white shadow-[0_0_10px_rgba(255,26,45,0.6)]'
                 : 'bg-[#181818] border border-[#333] text-zinc-500'
             }`}>
               3
             </div>
-            <span className={`text-xs ${registeredOrder ? 'font-bold text-white uppercase tracking-wider' : 'text-zinc-500'}`}>
+            <span className={`text-[11px] sm:text-xs whitespace-nowrap ${registeredOrder ? 'font-bold text-white uppercase tracking-wider' : 'text-zinc-500'}`}>
               3. Confirmação
             </span>
           </div>
@@ -233,7 +234,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
 
         {/* TELA DE PEDIDO REGISTRADO (STATUS PENDENTE OU CONCLUÍDO) */}
         {registeredOrder ? (
-          <div className="bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8 space-y-6 max-w-2xl mx-auto">
+          <div className="bg-[#121212] border border-[#222] rounded-3xl p-5 sm:p-8 space-y-6 max-w-2xl mx-auto">
             <div className="text-center space-y-2">
               <div className={`w-12 h-12 rounded-full flex items-center justify-center mx-auto border ${
                 orderPaymentStatus === 'approved'
@@ -258,23 +259,23 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                   ? 'Tempo Limite Expirado'
                   : 'Pedido Registrado com Sucesso!'}
               </h2>
-              <p className="text-xs text-zinc-400">
+              <p className="text-xs text-zinc-400 break-all">
                 Código do Pedido: <span className="font-mono text-white font-bold">{registeredOrder.order?.id}</span>
               </p>
 
               {orderPaymentStatus === 'approved' ? (
                 <div className="inline-flex items-center gap-1.5 px-3.5 py-1 bg-emerald-500/20 border border-emerald-500/30 rounded-full text-emerald-300 text-xs font-semibold">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                   <span>Ingressos emitidos oficialmente com validação QR Code</span>
                 </div>
               ) : isOrderExpired || orderPaymentStatus === 'cancelled' ? (
                 <div className="inline-flex items-center gap-1.5 px-3.5 py-1 bg-red-500/20 border border-[#FF1A2D]/40 rounded-full text-red-300 text-xs font-semibold">
-                  <AlertCircle className="w-3.5 h-3.5" />
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                   <span>Pedido Cancelado — Estoque liberado automaticamente</span>
                 </div>
               ) : (
                 <div className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-amber-500/10 border border-amber-500/30 rounded-full text-amber-300 text-xs font-semibold">
-                  <Clock className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  <Clock className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />
                   <span>Aguardando Pagamento — Expira em: <strong className="font-mono text-white">{formatCountdown(secondsRemaining)}</strong></span>
                 </div>
               )}
@@ -294,18 +295,18 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
             )}
 
             {/* Detalhes do Pagamento */}
-            <div className="bg-[#181818] border border-[#262626] rounded-2xl p-5 space-y-4">
-              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
-                <span className="text-zinc-400">Evento:</span>
-                <span className="font-bold text-white">{event.title}</span>
+            <div className="bg-[#181818] border border-[#262626] rounded-2xl p-4 sm:p-5 space-y-4">
+              <div className="flex justify-between items-center gap-2 text-xs pb-3 border-b border-[#222]">
+                <span className="text-zinc-400 shrink-0">Evento:</span>
+                <span className="font-bold text-white text-right truncate">{event.title}</span>
               </div>
-              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
+              <div className="flex justify-between items-center gap-2 text-xs pb-3 border-b border-[#222]">
                 <span className="text-zinc-400">Valor Total:</span>
                 <span className="font-bold text-[#FF1A2D] text-sm">
                   R$ {registeredOrder.order?.total?.toFixed(2)?.replace('.', ',')}
                 </span>
               </div>
-              <div className="flex justify-between items-center text-xs pb-3 border-b border-[#222]">
+              <div className="flex justify-between items-center gap-2 text-xs pb-3 border-b border-[#222]">
                 <span className="text-zinc-400">Forma de Pagamento:</span>
                 <span className="font-bold uppercase text-white">{registeredOrder.order?.payment_method}</span>
               </div>
@@ -313,7 +314,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
               {/* Seção Pix Copia e Cola (Apenas se pendente e não expirado) */}
               {orderPaymentStatus === 'pending' && !isOrderExpired && registeredOrder.payment?.pix_copy_paste && (
                 <div className="pt-2 space-y-2">
-                  <div className="flex justify-between items-center">
+                  <div className="flex flex-wrap justify-between items-center gap-1">
                     <label className="text-[10px] text-zinc-400 uppercase font-semibold">
                       Código Pix Copia e Cola (Mercado Pago)
                     </label>
@@ -322,7 +323,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                       Expira em {formatCountdown(secondsRemaining)}
                     </span>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="text"
                       readOnly
@@ -336,7 +337,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                         setCopiedPix(true);
                         setTimeout(() => setCopiedPix(false), 3000);
                       }}
-                      className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold px-4 py-2 rounded-xl whitespace-nowrap transition"
+                      className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold px-4 py-2.5 sm:py-2 rounded-xl whitespace-nowrap transition shrink-0"
                     >
                       {copiedPix ? 'Copiado!' : 'Copiar Pix'}
                     </button>

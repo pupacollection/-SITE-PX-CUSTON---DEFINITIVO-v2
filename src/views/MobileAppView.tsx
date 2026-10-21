@@ -1,6 +1,5 @@
 import React from 'react';
 import { EventItem, UserProfile, ActiveScreen } from '../types';
-import { PxLogo } from '../components/common/PxLogo';
 import {
   Bell,
   Ticket,
@@ -8,7 +7,6 @@ import {
   Calendar,
   MapPin,
   ArrowRight,
-  Sparkles,
   ShoppingBag,
 } from 'lucide-react';
 
@@ -44,45 +42,25 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
   const nextEvent = upcomingEvents[0];
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white pb-20">
-      {/* Top Mobile Bar */}
-      <div className="max-w-md mx-auto px-4 pt-4 pb-2 flex items-center justify-between border-b border-[#1a1a1a]">
-        <div className="flex items-center gap-2">
-          <PxLogo size="sm" />
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => onNavigate('digital_ticket')}
-            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300 hover:text-white relative"
-            title="Meus Ingressos"
-          >
-            <Ticket className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => onNavigate('profile', 'orders')}
-            className="w-9 h-9 rounded-full bg-[#141414] border border-[#2a2a2a] flex items-center justify-center text-zinc-300 hover:text-white"
-            title="Meus Pedidos"
-          >
-            <ShoppingBag className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
-      <div className="max-w-md mx-auto px-4 py-4 space-y-6">
+    <div className="min-h-screen bg-[#000000] text-white pb-24 md:pb-12">
+      <div className="max-w-lg mx-auto px-4 py-6 space-y-6">
         {/* User Greeting Block */}
-        <div className="flex items-center justify-between bg-[#121212] border border-[#222] p-4 rounded-2xl">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-full bg-[#FF1A2D] text-white font-black text-sm flex items-center justify-center shadow-[0_0_12px_rgba(255,26,45,0.4)]">
-              {user ? user.full_name.charAt(0) : 'PX'}
+        <div className="flex items-center justify-between gap-3 bg-[#121212] border border-[#222] p-4 rounded-2xl">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-11 h-11 rounded-full bg-[#FF1A2D] text-white font-black text-sm flex items-center justify-center shrink-0 shadow-[0_0_12px_rgba(255,26,45,0.4)]">
+              {user ? user.full_name.charAt(0).toUpperCase() : 'PX'}
             </div>
-            <div>
-              <p className="text-xs text-zinc-400">Olá, {user ? user.full_name.split(' ')[0] : 'Visitante'}!</p>
-              <p className="text-sm font-bold text-white tracking-wide">Bem-vindo de volta.</p>
+            <div className="min-w-0">
+              <p className="text-xs text-zinc-400 truncate">
+                Olá, {user ? user.full_name.split(' ')[0] : 'Visitante'}!
+              </p>
+              <p className="text-sm font-bold text-white tracking-wide truncate">Bem-vindo de volta.</p>
             </div>
           </div>
           <button
+            type="button"
             onClick={() => onNavigate('profile')}
-            className="text-[11px] font-semibold text-[#FF1A2D] bg-[#FF1A2D]/10 px-3 py-1.5 rounded-full border border-[#FF1A2D]/20"
+            className="text-[11px] font-semibold text-[#FF1A2D] bg-[#FF1A2D]/10 px-3 py-1.5 rounded-full border border-[#FF1A2D]/20 shrink-0 whitespace-nowrap"
           >
             Ver Conta
           </button>
@@ -91,7 +69,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
         {/* Featured Event Hero Banner */}
         {nextEvent && (
           <div className="relative rounded-2xl overflow-hidden border border-[#FF1A2D]/40 shadow-[0_0_25px_rgba(255,26,45,0.2)] bg-[#121212]">
-            <div className="relative h-44">
+            <div className="relative h-44 sm:h-52">
               <img
                 src={nextEvent.cover_image}
                 alt={nextEvent.title}
@@ -108,19 +86,19 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
               <h2 className="text-lg font-black uppercase tracking-tight text-white leading-tight">
                 {nextEvent.title}
               </h2>
-              <div className="flex items-center gap-3 text-xs text-zinc-300 mt-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-300 mt-2">
                 <span className="flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5 text-[#FF1A2D]" />
-                  {nextEvent.formatted_date}
+                  <Calendar className="w-3.5 h-3.5 text-[#FF1A2D] shrink-0" />
+                  <span>{nextEvent.formatted_date}</span>
                 </span>
-                <span>•</span>
+                <span className="hidden xs:inline">•</span>
                 <span className="flex items-center gap-1">
-                  <MapPin className="w-3.5 h-3.5 text-[#FF1A2D]" />
-                  {nextEvent.city}/{nextEvent.state}
+                  <MapPin className="w-3.5 h-3.5 text-[#FF1A2D] shrink-0" />
+                  <span>{nextEvent.city}/{nextEvent.state}</span>
                 </span>
               </div>
 
-              <div className="mt-4 flex items-center justify-between">
+              <div className="mt-4 flex items-center justify-between gap-3">
                 <div>
                   <span className="text-[10px] text-zinc-400 block">Ingresso a partir de</span>
                   <span className="text-sm font-extrabold text-[#FF1A2D]">
@@ -128,8 +106,9 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
                   </span>
                 </div>
                 <button
+                  type="button"
                   onClick={() => onSelectEvent(nextEvent)}
-                  className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2 rounded-lg shadow transition"
+                  className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2 rounded-lg shadow transition shrink-0"
                 >
                   Ver Detalhes
                 </button>
@@ -138,9 +117,10 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
           </div>
         )}
 
-        {/* Quick Action Grid (Meus Ingressos, Meu Perfil, Notificações) */}
-        <div className="grid grid-cols-3 gap-3">
+        {/* Quick Action Grid (Meus Ingressos, Meus Pedidos, Meu Perfil, Notificações) */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
           <button
+            type="button"
             onClick={() => onNavigate('digital_ticket')}
             className="bg-[#121212] hover:bg-[#181818] border border-[#222] p-3.5 rounded-xl flex flex-col items-center justify-center text-center transition group"
           >
@@ -151,6 +131,18 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
           </button>
 
           <button
+            type="button"
+            onClick={() => onNavigate('profile', 'orders')}
+            className="bg-[#121212] hover:bg-[#181818] border border-[#222] p-3.5 rounded-xl flex flex-col items-center justify-center text-center transition group"
+          >
+            <div className="w-10 h-10 rounded-full bg-[#1c1c1c] group-hover:bg-[#FF1A2D] text-zinc-300 group-hover:text-white flex items-center justify-center mb-2 transition">
+              <ShoppingBag className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-zinc-200">Meus Pedidos</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => onNavigate('profile')}
             className="bg-[#121212] hover:bg-[#181818] border border-[#222] p-3.5 rounded-xl flex flex-col items-center justify-center text-center transition group"
           >
@@ -161,6 +153,7 @@ export const MobileAppView: React.FC<MobileAppViewProps> = ({
           </button>
 
           <button
+            type="button"
             onClick={() => onNavigate('profile', 'notifications')}
             className="bg-[#121212] hover:bg-[#181818] border border-[#222] p-3.5 rounded-xl flex flex-col items-center justify-center text-center transition group"
           >

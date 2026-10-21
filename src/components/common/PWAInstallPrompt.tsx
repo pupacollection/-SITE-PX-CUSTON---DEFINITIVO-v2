@@ -15,18 +15,19 @@ export const PWAInstallPrompt: React.FC = () => {
     <>
       {/* Chromium / Android install prompt */}
       {isInstallable && (
-        <div className="fixed bottom-20 left-4 right-4 md:bottom-6 md:right-6 md:left-auto md:w-96 z-40 bg-[#141414] border border-[#2a2a2a] p-3.5 rounded-xl shadow-2xl flex items-center justify-between gap-3 animate-fade-in">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 flex items-center justify-center text-[#FF1A2D]">
+        <div className="fixed bottom-24 left-4 right-4 md:bottom-6 md:right-6 md:left-auto md:w-96 z-40 bg-[#141414] border border-[#2a2a2a] p-3.5 rounded-xl shadow-2xl flex items-center justify-between gap-3 animate-fade-in">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-lg bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 flex items-center justify-center text-[#FF1A2D] shrink-0">
               <Smartphone className="w-5 h-5" />
             </div>
-            <div>
-              <p className="text-xs font-bold text-white uppercase tracking-wider">Instalar PX CUSTON</p>
-              <p className="text-[11px] text-zinc-400">Acesse ingressos e check-in offline</p>
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-white uppercase tracking-wider truncate">Instalar PX CUSTON</p>
+              <p className="text-[11px] text-zinc-400 truncate">Acesse ingressos e check-in offline</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
+              type="button"
               onClick={install}
               className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow transition"
             >
@@ -34,8 +35,10 @@ export const PWAInstallPrompt: React.FC = () => {
               Instalar
             </button>
             <button
+              type="button"
               onClick={() => setIsDismissed(true)}
               className="text-zinc-500 hover:text-zinc-300 p-1"
+              aria-label="Fechar aviso de instalação"
             >
               <X className="w-4 h-4" />
             </button>
@@ -45,9 +48,9 @@ export const PWAInstallPrompt: React.FC = () => {
 
       {/* iOS Safari manual install banner */}
       {isIOS && !isInstallable && (
-        <div className="fixed bottom-20 left-4 right-4 md:bottom-6 md:right-6 md:left-auto md:w-80 z-40 bg-[#141414] border border-[#2a2a2a] p-3 rounded-xl shadow-2xl flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <Smartphone className="w-5 h-5 text-[#FF1A2D]" />
+        <div className="fixed bottom-24 left-4 right-4 md:bottom-6 md:right-6 md:left-auto md:w-80 z-40 bg-[#141414] border border-[#2a2a2a] p-3 rounded-xl shadow-2xl flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Smartphone className="w-5 h-5 text-[#FF1A2D] shrink-0" />
             <span className="text-xs text-zinc-300">Instale no seu iPhone</span>
           </div>
           <div className="flex items-center gap-2">

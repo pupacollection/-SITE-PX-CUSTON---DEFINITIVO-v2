@@ -314,10 +314,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-8">
+    <div className="min-h-screen bg-[#000000] text-white py-8 sm:py-10 pb-24 md:pb-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8">
         {/* Left Sidebar Navigation */}
-        <div className="md:col-span-1 space-y-2">
+        <div className="lg:col-span-1 space-y-2">
           {/* User mini summary badge */}
           <div className="bg-[#121212] border border-[#222] p-4 rounded-2xl flex items-center gap-3 mb-4">
             <div className="w-12 h-12 rounded-full bg-[#FF1A2D] text-white font-black text-lg flex items-center justify-center shrink-0 shadow-[0_0_15px_rgba(255,26,45,0.4)]">
@@ -325,9 +325,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </div>
             <div className="min-w-0">
               <h3 className="text-sm font-bold truncate text-white">{user.full_name}</h3>
-              <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                 <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-semibold">
-                  <CheckCircle2 className="w-3 h-3" /> Verificado
+                  <CheckCircle2 className="w-3 h-3 shrink-0" /> Verificado
                 </span>
                 {user.role === 'SUPER_ADMIN' ? (
                   <span className="text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-[#FF1A2D]/20 text-[#FF1A2D] border border-[#FF1A2D]/40">
@@ -350,34 +350,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </div>
           </div>
 
-          {/* Atalho de Destaque PX CONTROL para Administradores */}
-          {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
-            <div className="bg-[#181112] border border-[#FF1A2D]/40 p-3.5 rounded-2xl mb-4 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[#FF1A2D] uppercase tracking-wider flex items-center gap-1.5 font-heading">
-                  <ShieldCheck className="w-4 h-4" /> PX CONTROL
-                </span>
-                <span className="text-[9px] bg-[#FF1A2D] text-white font-extrabold px-1.5 py-0.5 rounded uppercase font-mono">
-                  {user.role}
-                </span>
-              </div>
-              <p className="text-[11px] text-zinc-300 leading-snug">
-                Painel administrativo de métricas, pedidos oficiais e configurações do sistema.
-              </p>
-              <button
-                type="button"
-                onClick={() => onNavigate('admin_dashboard')}
-                className="w-full bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-2 shadow-[0_0_12px_rgba(255,26,45,0.3)] transition"
-              >
-                <LayoutDashboard className="w-3.5 h-3.5" />
-                <span>Abrir PX CONTROL</span>
-              </button>
-            </div>
-          )}
-
           <div className="bg-[#121212] border border-[#222] rounded-2xl p-2 space-y-1">
             {/* 1. Meu Perfil */}
             <button
+              type="button"
               onClick={() => setActiveTab('profile')}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-3 transition ${
                 activeTab === 'profile'
@@ -385,12 +361,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <User className="w-4 h-4" />
+              <User className="w-4 h-4 shrink-0" />
               <span>Meu Perfil</span>
             </button>
 
             {/* 2. Meus Ingressos */}
             <button
+              type="button"
               onClick={() => setActiveTab('tickets')}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition ${
                 activeTab === 'tickets'
@@ -399,7 +376,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               }`}
             >
               <div className="flex items-center gap-3">
-                <TicketIcon className="w-4 h-4" />
+                <TicketIcon className="w-4 h-4 shrink-0" />
                 <span>Meus Ingressos</span>
               </div>
               {tickets.length > 0 && (
@@ -411,6 +388,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             {/* 3. Meus Pedidos */}
             <button
+              type="button"
               onClick={() => setActiveTab('orders')}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition ${
                 activeTab === 'orders'
@@ -419,7 +397,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               }`}
             >
               <div className="flex items-center gap-3">
-                <ShoppingBag className="w-4 h-4" />
+                <ShoppingBag className="w-4 h-4 shrink-0" />
                 <span>Meus Pedidos</span>
               </div>
               {orders.length > 0 && (
@@ -431,6 +409,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             {/* 4. Meus Veículos */}
             <button
+              type="button"
               onClick={() => setActiveTab('vehicles')}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition ${
                 activeTab === 'vehicles'
@@ -439,7 +418,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               }`}
             >
               <div className="flex items-center gap-3">
-                <Car className="w-4 h-4" />
+                <Car className="w-4 h-4 shrink-0" />
                 <span>Meus Veículos</span>
               </div>
               {vehicles.length > 0 && (
@@ -451,6 +430,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             {/* 5. Notificações */}
             <button
+              type="button"
               onClick={() => setActiveTab('notifications')}
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition ${
                 activeTab === 'notifications'
@@ -459,7 +439,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               }`}
             >
               <div className="flex items-center gap-3">
-                <Bell className="w-4 h-4" />
+                <Bell className="w-4 h-4 shrink-0" />
                 <span>Notificações</span>
               </div>
               {unreadCount > 0 && (
@@ -473,18 +453,20 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
               <div className="pt-2 border-t border-[#1e1e1e] space-y-1">
                 <button
+                  type="button"
                   onClick={() => onNavigate('admin_dashboard')}
                   className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-3 bg-[#FF1A2D]/15 border border-[#FF1A2D]/40 text-[#FF1A2D] hover:bg-[#FF1A2D] hover:text-white transition shadow-[0_0_15px_rgba(255,26,45,0.2)]"
                 >
-                  <ShieldCheck className="w-4 h-4" />
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
                   <span>Painel PX CONTROL</span>
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => onNavigate('admin_payments')}
                   className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
                 >
-                  <Settings className="w-4 h-4" />
+                  <Settings className="w-4 h-4 shrink-0" />
                   <span>Configurações do Sistema</span>
                 </button>
               </div>
@@ -492,10 +474,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             <div className="pt-2 border-t border-[#1e1e1e]">
               <button
+                type="button"
                 onClick={onLogout}
                 className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-3 text-red-400 hover:bg-red-950/30 transition"
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut className="w-4 h-4 shrink-0" />
                 <span>Sair</span>
               </button>
             </div>
@@ -503,7 +486,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
 
         {/* Right Main Content */}
-        <div className="md:col-span-3 space-y-6">
+        <div className="lg:col-span-3 space-y-6">
           {/* TAB 1: MEU PERFIL */}
           {activeTab === 'profile' && (
             <div className="bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8">
@@ -544,26 +527,16 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
               {/* Informação de Papel Administrativo */}
               {['ADMIN', 'SUPER_ADMIN'].includes(user.role) && (
-                <div className="mb-5 bg-[#181112] border border-[#FF1A2D]/30 text-xs p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <ShieldCheck className="w-5 h-5 text-[#FF1A2D] shrink-0" />
-                    <div>
-                      <span className="text-zinc-200 block">
-                        Privilégio de acesso: <strong className="text-white">{user.role === 'SUPER_ADMIN' ? 'Super Administrador' : 'Administrador'}</strong>
-                      </span>
-                      <span className="text-[11px] text-zinc-400">
-                        Você possui autorização para acessar o painel PX CONTROL.
-                      </span>
-                    </div>
+                <div className="mb-5 bg-[#181112] border border-[#FF1A2D]/30 text-xs p-4 rounded-2xl flex items-center gap-2.5">
+                  <ShieldCheck className="w-5 h-5 text-[#FF1A2D] shrink-0" />
+                  <div>
+                    <span className="text-zinc-200 block">
+                      Privilégio de acesso: <strong className="text-white">{user.role === 'SUPER_ADMIN' ? 'Super Administrador' : 'Administrador'}</strong>
+                    </span>
+                    <span className="text-[11px] text-zinc-400">
+                      Você possui autorização para acessar o painel PX CONTROL pelo cabeçalho ou menu lateral.
+                    </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onNavigate('admin_dashboard')}
-                    className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold px-3.5 py-2 rounded-xl shrink-0 transition flex items-center justify-center gap-1.5 shadow-[0_0_10px_rgba(255,26,45,0.3)]"
-                  >
-                    <LayoutDashboard className="w-3.5 h-3.5" />
-                    <span>Acessar PX CONTROL</span>
-                  </button>
                 </div>
               )}
 
@@ -811,8 +784,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
+                    type="button"
                     onClick={() => setOrdersFilter('all')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
                       ordersFilter === 'all'
@@ -823,6 +797,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     Todos ({orders.length})
                   </button>
                   <button
+                    type="button"
                     onClick={() => setOrdersFilter('approved')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
                       ordersFilter === 'approved'
@@ -833,6 +808,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     Aprovados
                   </button>
                   <button
+                    type="button"
                     onClick={() => setOrdersFilter('pending')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
                       ordersFilter === 'pending'

@@ -370,10 +370,14 @@ export default function App() {
     handleNavigate('home');
   };
 
-  // Verifica se a tela atual é administrativa com usuário autorizado (possui barra lateral ou cabeçalho próprio)
+  // Verifica se a tela atual é administrativa ou de operação de portaria com usuário autorizado (possui cabeçalho próprio)
   const isDedicatedAdmin =
     ADMIN_SCREENS.includes(currentScreen) &&
     Boolean(user && ['ADMIN', 'SUPER_ADMIN'].includes(user.role));
+
+  const isDedicatedOperatorCheckin =
+    currentScreen === 'checkin' &&
+    Boolean(user && ['CHECKIN_OPERATOR', 'ADMIN', 'SUPER_ADMIN'].includes(user.role));
 
   return (
     <div className="min-h-screen bg-[#000000] text-white flex flex-col font-sans selection:bg-[#FF1A2D] selection:text-white">
@@ -383,8 +387,8 @@ export default function App() {
       {/* PWA Install Button & iOS guide */}
       <PWAInstallPrompt />
 
-      {/* Header bar (shown on all views except full admin dashboard which has dedicated sidebar) */}
-      {!isDedicatedAdmin && (
+      {/* Header bar (shown on all views except dedicated admin dashboard and operator check-in which have their own header) */}
+      {!isDedicatedAdmin && !isDedicatedOperatorCheckin && (
         <Header
           currentScreen={currentScreen}
           onNavigate={handleNavigate}
@@ -591,6 +595,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
           <div className="w-full max-w-md">
             <AuthView
+              isModal
               onSuccess={(loggedUser) => {
                 setUser(loggedUser);
                 setAuthModalOpen(false);

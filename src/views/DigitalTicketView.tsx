@@ -82,9 +82,10 @@ export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
 
   if (!activeTicket) {
     return (
-      <div className="min-h-screen bg-[#000000] text-white flex flex-col items-center justify-center p-6">
+      <div className="min-h-[calc(100vh-4.5rem)] bg-[#000000] text-white flex flex-col items-center justify-center p-6 pb-24 md:pb-12 text-center">
         <p className="text-zinc-400 text-sm mb-4">Você ainda não possui ingressos emitidos.</p>
         <button
+          type="button"
           onClick={() => onNavigate('events')}
           className="bg-[#FF1A2D] text-white text-xs font-bold uppercase tracking-wider px-6 py-3 rounded-xl"
         >
@@ -95,10 +96,11 @@ export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
   }
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white py-10 px-4 sm:px-6 flex flex-col items-center justify-center">
+    <div className="min-h-[calc(100vh-4.5rem)] bg-[#000000] text-white py-6 sm:py-10 pb-24 md:pb-12 px-4 sm:px-6 flex flex-col items-center justify-start sm:justify-center">
       {/* Top Navigation */}
       <div className="w-full max-w-sm mb-4 flex items-center justify-between">
         <button
+          type="button"
           onClick={onBack || (() => onNavigate('profile'))}
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 hover:text-white bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] px-3 py-1.5 rounded-xl transition"
           aria-label="Voltar"
@@ -113,6 +115,7 @@ export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
       {tickets.length > 1 && (
         <div className="flex items-center gap-4 mb-4 text-xs text-zinc-400">
           <button
+            type="button"
             onClick={handlePrev}
             className="p-1.5 rounded-lg bg-[#141414] border border-[#2a2a2a] hover:text-white"
           >
@@ -123,6 +126,7 @@ export const DigitalTicketView: React.FC<DigitalTicketViewProps> = ({
             <strong className="text-white">{tickets.length}</strong>
           </span>
           <button
+            type="button"
             onClick={handleNext}
             className="p-1.5 rounded-lg bg-[#141414] border border-[#2a2a2a] hover:text-white"
           >

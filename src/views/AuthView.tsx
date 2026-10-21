@@ -24,9 +24,10 @@ import {
 interface AuthViewProps {
   onSuccess: (user: UserProfile) => void;
   onCancel: () => void;
+  isModal?: boolean;
 }
 
-export const AuthView: React.FC<AuthViewProps> = ({ onSuccess, onCancel }) => {
+export const AuthView: React.FC<AuthViewProps> = ({ onSuccess, onCancel, isModal = false }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'init_admin'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -107,24 +108,34 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess, onCancel }) => {
   };
 
   return (
-    <div className="min-h-screen bg-[#000000] flex items-center justify-center p-4 relative overflow-hidden">
-      {/* Background with Ambient Automotive Lighting */}
-      <div
-        className="absolute inset-0 bg-cover bg-center opacity-25"
-        style={{
-          backgroundImage:
-            'url(https://images.unsplash.com/photo-1542282088-72c9c27ed0cd?auto=format&fit=crop&w=1600&q=80)',
-        }}
-      />
-      <div className="absolute inset-0 bg-gradient-to-t from-[#000000] via-[#000000]/85 to-[#000000]/95" />
-      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-80 h-80 bg-[#FF1A2D]/20 rounded-full blur-[100px] pointer-events-none" />
+    <div
+      className={
+        isModal
+          ? 'w-full flex items-center justify-center relative'
+          : 'min-h-[calc(100vh-4.5rem)] bg-[#000000] flex items-center justify-center py-8 pb-24 md:pb-12 px-4 relative overflow-hidden'
+      }
+    >
+      {/* Background with Ambient Automotive Lighting (only in standalone view) */}
+      {!isModal && (
+        <>
+          <div
+            className="absolute inset-0 bg-cover bg-center opacity-25"
+            style={{
+              backgroundImage:
+                'url(https://images.unsplash.com/photo-1542282088-72c9c27ed0cd?auto=format&fit=crop&w=1600&q=80)',
+            }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#000000] via-[#000000]/85 to-[#000000]/95" />
+          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-80 h-80 bg-[#FF1A2D]/20 rounded-full blur-[100px] pointer-events-none" />
+        </>
+      )}
 
       {/* Auth Card Container */}
-      <div className="relative z-10 w-full max-w-md bg-[#111111]/90 backdrop-blur-xl border border-[#222] rounded-3xl p-6 sm:p-8 shadow-2xl">
+      <div className="relative z-10 w-full max-w-md max-h-[90vh] overflow-y-auto bg-[#111111]/95 backdrop-blur-xl border border-[#222] rounded-3xl p-5 sm:p-8 shadow-2xl">
         {/* Logo Badge */}
-        <div className="flex flex-col items-center mb-6">
-          <PxLogo size="lg" />
-          <h2 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-white mt-4 font-heading text-center">
+        <div className="flex flex-col items-center mb-5">
+          <PxLogo size="md" />
+          <h2 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-white mt-3 font-heading text-center">
             {mode === 'login' && 'Seja bem-vindo!'}
             {mode === 'register' && 'Crie sua Conta'}
             {mode === 'forgot' && 'Recuperar Senha'}

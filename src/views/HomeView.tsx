@@ -30,9 +30,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const nextEvent = upcomingEvents[0];
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white">
+    <div className="min-h-screen bg-[#000000] text-white pb-20 md:pb-0">
       {/* 01. HERO BANNER */}
-      <section className="relative min-h-[580px] md:min-h-[680px] flex items-center justify-center overflow-hidden border-b border-[#1a1a1a]">
+      <section className="relative min-h-[420px] sm:min-h-[540px] md:min-h-[680px] flex items-center justify-center overflow-hidden border-b border-[#1a1a1a]">
         {/* Background Image with Dark Vignette & Red Automotive Glow */}
         <div
           className="absolute inset-0 bg-cover bg-center opacity-40 scale-105 transform transition duration-1000"
@@ -47,28 +47,28 @@ export const HomeView: React.FC<HomeViewProps> = ({
         {/* Ambient Red Glow Spotlight */}
         <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-[#FF1A2D]/15 rounded-full blur-[120px] pointer-events-none" />
 
-        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 w-full flex flex-col md:flex-row items-center justify-between gap-10">
+        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-14 md:py-16 w-full flex flex-col md:flex-row items-center justify-between gap-6 sm:gap-8 md:gap-10">
           {/* Left Text Block */}
           <div className="max-w-2xl text-left">
             {/* Exclusive Badge */}
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#181818] border border-[#2a2a2a] text-[#FF1A2D] text-xs font-bold uppercase tracking-wider mb-5">
-              <Flame className="w-3.5 h-3.5" />
+            <div className="inline-flex items-center gap-2 px-2.5 sm:px-3 py-1 rounded-full bg-[#181818] border border-[#2a2a2a] text-[#FF1A2D] text-[10px] sm:text-xs font-bold uppercase tracking-wider mb-3.5 sm:mb-5">
+              <Flame className="w-3.5 h-3.5 shrink-0" />
               <span>Plataforma Oficial de Eventos PX CUSTON</span>
             </div>
 
-            <h1 className="text-4xl sm:text-5xl md:text-6xl font-black uppercase tracking-tight font-heading leading-[1.05]">
+            <h1 className="text-3xl sm:text-5xl md:text-6xl font-black uppercase tracking-tight font-heading leading-[1.08] sm:leading-[1.05]">
               EVENTOS, CARROS E{' '}
               <span className="text-[#FF1A2D] drop-shadow-[0_0_25px_rgba(255,26,45,0.6)]">
                 EXPERIÊNCIAS
               </span>
             </h1>
 
-            <p className="mt-5 text-base sm:text-lg text-zinc-300 max-w-xl font-normal leading-relaxed">
+            <p className="mt-3.5 sm:mt-5 text-sm sm:text-lg text-zinc-300 max-w-xl font-normal leading-relaxed">
               Viva a cultura automotiva com a PX CUSTON. Eventos oficiais, encontros de rebaixados, competições de som e muito mais.
             </p>
 
             {/* CTAs */}
-            <div className="mt-8 flex flex-wrap items-center gap-4">
+            <div className="mt-6 sm:mt-8 flex flex-wrap items-center gap-3 sm:gap-4">
               <button
                 onClick={() => {
                   if (nextEvent) {
@@ -77,7 +77,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                     onNavigate('events');
                   }
                 }}
-                className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-sm font-bold uppercase tracking-wider px-7 py-3.5 rounded-xl shadow-[0_0_20px_rgba(255,26,45,0.45)] transition transform hover:-translate-y-0.5 flex items-center gap-2"
+                className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs sm:text-sm font-bold uppercase tracking-wider px-5 sm:px-7 py-3 sm:py-3.5 rounded-xl shadow-[0_0_20px_rgba(255,26,45,0.45)] transition transform hover:-translate-y-0.5 flex items-center gap-2"
               >
                 <span>Ver Próximos Eventos</span>
                 <ArrowRight className="w-4 h-4" />
@@ -85,7 +85,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
               <button
                 onClick={() => onNavigate('events')}
-                className="bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] text-zinc-200 text-sm font-semibold px-6 py-3.5 rounded-xl transition"
+                className="bg-[#141414] hover:bg-[#1f1f1f] border border-[#2a2a2a] text-zinc-200 text-xs sm:text-sm font-semibold px-5 sm:px-6 py-3 sm:py-3.5 rounded-xl transition"
               >
                 Saiba Mais
               </button>
@@ -121,7 +121,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
       </section>
 
       {/* 02. SECTION: PRÓXIMOS EVENTOS */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-16">
         <div className="flex items-center justify-between mb-8">
           <div>
             <h2 className="text-2xl sm:text-3xl font-black uppercase tracking-tight font-heading">

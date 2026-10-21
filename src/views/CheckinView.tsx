@@ -135,20 +135,22 @@ export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate, o
   };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white py-6 px-4 sm:px-6 flex flex-col items-center">
+    <div className="min-h-screen bg-[#050505] text-white py-6 pb-24 md:pb-12 px-4 sm:px-6 flex flex-col items-center">
       <div className="w-full max-w-md space-y-5">
         {/* Top Operator Header */}
-        <div className="flex items-center justify-between border-b border-[#1c1c1c] pb-4">
-          <div className="flex items-center gap-2">
+        <header className="flex items-center justify-between gap-2 border-b border-[#1c1c1c] pb-4">
+          <div className="flex items-center gap-2.5 min-w-0">
             <button
+              type="button"
               onClick={onBack || (() => onNavigate('home'))}
-              className="p-1.5 rounded-lg bg-[#141414] border border-[#262626] text-zinc-400 hover:text-white transition"
+              className="px-2.5 py-1.5 rounded-lg bg-[#141414] border border-[#262626] text-zinc-300 hover:text-white transition flex items-center gap-1.5 text-xs font-semibold shrink-0"
               aria-label="Voltar"
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-4 h-4 text-[#FF1A2D] shrink-0" />
+              <span>Voltar</span>
             </button>
-            <div>
-              <div className="flex items-center gap-1.5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-xs font-black tracking-widest text-[#FF1A2D] uppercase">
                   PX CHECK-IN
                 </span>
@@ -156,27 +158,31 @@ export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate, o
                   Operador
                 </span>
               </div>
-              <p className="text-[11px] text-zinc-400">Valide os ingressos rapidamente</p>
+              <p className="text-[11px] text-zinc-400 truncate">Valide os ingressos rapidamente</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
+              type="button"
               onClick={() => setSoundEnabled(!soundEnabled)}
-              className="p-2 rounded-lg bg-[#141414] border border-[#2a2a2a] text-zinc-300"
+              className="p-2 rounded-lg bg-[#141414] border border-[#2a2a2a] text-zinc-300 hover:text-white transition"
               title={soundEnabled ? 'Silenciar bip' : 'Ativar som'}
+              aria-label={soundEnabled ? 'Silenciar bip' : 'Ativar som'}
             >
               {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
             <button
+              type="button"
               onClick={() => (cameraActive ? stopCamera() : startCamera())}
-              className="p-2 rounded-lg bg-[#141414] border border-[#2a2a2a] text-zinc-300"
+              className="p-2 rounded-lg bg-[#141414] border border-[#2a2a2a] text-zinc-300 hover:text-white transition"
               title="Reiniciar Câmera"
+              aria-label="Reiniciar Câmera"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
           </div>
-        </div>
+        </header>
 
         {/* Viewfinder Box (Screen 08 Scanner View) */}
         <div className="relative w-full aspect-square max-h-[380px] bg-[#0c0c0c] border border-[#222] rounded-3xl overflow-hidden flex items-center justify-center shadow-2xl">

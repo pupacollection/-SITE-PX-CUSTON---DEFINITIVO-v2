@@ -181,70 +181,85 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   return (
     <div className="min-h-screen bg-[#000000] text-white flex flex-col md:flex-row">
       {/* Sidebar: PX CONTROL */}
-      <aside className="w-full md:w-64 bg-[#0d0d0d] border-b md:border-b-0 md:border-r border-[#1c1c1c] p-4 flex flex-col justify-between shrink-0">
-        <div className="space-y-6">
-          {/* Brand header */}
-          <div className="flex items-center gap-2 px-2 pt-2">
+      <aside className="w-full md:w-64 bg-[#0d0d0d] border-b md:border-b-0 md:border-r border-[#1c1c1c] p-3 sm:p-4 flex flex-col justify-between shrink-0">
+        <div className="space-y-3 md:space-y-6">
+          {/* Brand header + Mobile Back button */}
+          <div className="flex items-center justify-between gap-2 px-1 sm:px-2 pt-1 md:pt-2">
             <span className="text-base font-black tracking-widest text-[#FF1A2D] uppercase font-heading">
               PX CONTROL
             </span>
+            <button
+              type="button"
+              onClick={() => onNavigate('home')}
+              className="md:hidden px-2.5 py-1.5 rounded-lg bg-[#161616] border border-[#2a2a2a] text-xs text-zinc-300 hover:text-white flex items-center gap-1.5"
+            >
+              <LogOut className="w-3.5 h-3.5 text-[#FF1A2D]" />
+              <span>Voltar ao Site</span>
+            </button>
           </div>
 
-          {/* Navigation menu */}
-          <nav className="space-y-1 text-xs">
+          {/* Navigation menu (horizontal scroll on mobile, vertical stack on md+) */}
+          <nav
+            aria-label="Navegação administrativa PX CONTROL"
+            className="flex md:flex-col gap-1.5 md:gap-1 overflow-x-auto md:overflow-visible pb-1 md:pb-0 text-xs"
+          >
             <button
+              type="button"
               onClick={() => setAdminTab('dashboard')}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-bold flex items-center gap-3 transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-bold flex items-center gap-2.5 md:gap-3 transition ${
                 adminTab === 'dashboard'
                   ? 'bg-[#FF1A2D] text-white shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <LayoutDashboard className="w-4 h-4" />
+              <LayoutDashboard className="w-4 h-4 shrink-0" />
               <span>Dashboard</span>
             </button>
 
             <button
+              type="button"
               onClick={() => setAdminTab('events')}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 transition ${
                 adminTab === 'events'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <Calendar className="w-4 h-4" />
+              <Calendar className="w-4 h-4 shrink-0" />
               <span>Eventos</span>
             </button>
 
             <button
+              type="button"
               onClick={() => {
                 setSelectedBatchEventId('');
                 setAdminTab('tickets');
               }}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 transition ${
                 adminTab === 'tickets'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <Ticket className="w-4 h-4" />
+              <Ticket className="w-4 h-4 shrink-0" />
               <span>Lotes & Ingressos</span>
             </button>
 
             {/* Menu Pedidos: Alterna para aba de Gestão de Pedidos (Todos) */}
             <button
+              type="button"
               onClick={() => {
                 setAdminTab('orders');
                 setOrdersFilter('all');
               }}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between gap-2 transition ${
                 adminTab === 'orders' && ordersFilter === 'all'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <div className="flex items-center gap-3">
-                <ShoppingBag className="w-4 h-4" />
+              <div className="flex items-center gap-2.5 md:gap-3">
+                <ShoppingBag className="w-4 h-4 shrink-0" />
                 <span>Pedidos</span>
               </div>
               <span className="bg-[#222] text-zinc-300 text-[10px] px-2 py-0.5 rounded-full font-mono">
@@ -253,44 +268,47 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={() => setAdminTab('users')}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 transition ${
                 adminTab === 'users'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <Users className="w-4 h-4" />
+              <Users className="w-4 h-4 shrink-0" />
               <span>Usuários</span>
             </button>
 
             {/* Menu Identidade Visual & PWA */}
             <button
+              type="button"
               onClick={() => setAdminTab('branding')}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 transition ${
                 adminTab === 'branding'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <Palette className="w-4 h-4" />
+              <Palette className="w-4 h-4 shrink-0" />
               <span>Ícone & PWA</span>
             </button>
 
             {/* Menu Financeiro: Alterna para Pedidos Faturados / Receita Aprovada */}
             <button
+              type="button"
               onClick={() => {
                 setAdminTab('orders');
                 setOrdersFilter('approved');
               }}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between transition ${
+              className={`shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center justify-between gap-2 transition ${
                 adminTab === 'orders' && ordersFilter === 'approved'
                   ? 'bg-[#FF1A2D] text-white font-bold shadow-[0_0_15px_rgba(255,26,45,0.4)]'
                   : 'text-zinc-400 hover:text-white hover:bg-[#181818]'
               }`}
             >
-              <div className="flex items-center gap-3">
-                <DollarSign className="w-4 h-4" />
+              <div className="flex items-center gap-2.5 md:gap-3">
+                <DollarSign className="w-4 h-4 shrink-0" />
                 <span>Financeiro</span>
               </div>
               <span className="text-[10px] text-emerald-400 font-mono font-bold">
@@ -300,25 +318,28 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
             {/* Menu Configurações: Gateway Mercado Pago & Sistema */}
             <button
+              type="button"
               onClick={() => onNavigate('admin_payments')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              className="shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
             >
-              <Settings className="w-4 h-4" />
+              <Settings className="w-4 h-4 shrink-0" />
               <span>Configurações</span>
             </button>
 
             <button
+              type="button"
               onClick={() => onNavigate('admin_cache')}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
+              className="shrink-0 whitespace-nowrap md:w-full text-left px-3.5 py-2.5 rounded-xl font-medium flex items-center gap-2.5 md:gap-3 text-zinc-400 hover:text-white hover:bg-[#181818] transition"
             >
-              <Trash2 className="w-4 h-4" />
+              <Trash2 className="w-4 h-4 shrink-0" />
               <span>Limpeza de Cache</span>
             </button>
           </nav>
         </div>
 
-        <div className="pt-4 border-t border-[#1c1c1c]">
+        <div className="hidden md:block pt-4 border-t border-[#1c1c1c]">
           <button
+            type="button"
             onClick={() => onNavigate('home')}
             className="w-full text-left px-3.5 py-2 rounded-xl text-xs text-zinc-400 hover:text-white flex items-center gap-2"
           >
@@ -329,7 +350,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       </aside>
 
       {/* Main Admin Content */}
-      <main className="flex-1 p-4 sm:p-8 space-y-8 overflow-y-auto">
+      <main className="flex-1 p-4 sm:p-8 space-y-8 overflow-y-auto min-w-0">
         {/* SEÇÃO 1: DASHBOARD GERAL */}
         {adminTab === 'dashboard' && (
           <>
@@ -344,12 +365,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
                 <div className="bg-[#141414] border border-[#2a2a2a] px-3.5 py-2 rounded-xl text-xs text-zinc-300">
                   {dateRange}
                 </div>
 
                 <button
+                  type="button"
                   onClick={() => alert('Exportando relatório consolidado PX CONTROL (CSV/PDF)...')}
                   className="bg-[#FF1A2D] hover:bg-[#e00f21] text-white text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition flex items-center gap-2"
                 >

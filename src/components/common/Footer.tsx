@@ -1,7 +1,7 @@
 import React from 'react';
 import { PxLogo } from './PxLogo';
 import { ActiveScreen } from '../../types';
-import { Instagram, Youtube, Facebook, ShieldCheck } from 'lucide-react';
+import { Instagram, Youtube, Facebook, Smartphone } from 'lucide-react';
 
 interface FooterProps {
   onNavigate: (screen: ActiveScreen) => void;
@@ -9,7 +9,7 @@ interface FooterProps {
 
 export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
   return (
-    <footer className="bg-[#080808] border-t border-[#1a1a1a] text-zinc-400 text-xs pt-12 pb-24 md:pb-12">
+    <footer className="bg-[#080808] border-t border-[#1a1a1a] text-zinc-400 text-xs pt-12 pb-28 md:pb-12">
       <div className="max-w-6xl mx-auto px-4 flex flex-col items-center text-center">
         {/* Brand Emblem */}
         <div
@@ -36,33 +36,30 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         </div>
 
         {/* Navigation Links */}
-        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-zinc-400 my-4">
-          <button onClick={() => onNavigate('home')} className="hover:text-white transition">
+        <div className="flex flex-wrap items-center justify-center gap-x-5 sm:gap-x-6 gap-y-2 text-xs text-zinc-400 my-4">
+          <button type="button" onClick={() => onNavigate('home')} className="hover:text-white transition">
             Início
           </button>
-          <button onClick={() => onNavigate('events')} className="hover:text-white transition">
+          <button type="button" onClick={() => onNavigate('events')} className="hover:text-white transition">
             Eventos
           </button>
-          <button onClick={() => onNavigate('home')} className="hover:text-white transition">
-            Sobre
+          <button
+            type="button"
+            onClick={() => onNavigate('mobile_app')}
+            className="hover:text-white transition flex items-center gap-1"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-[#FF1A2D]" />
+            <span>App Mobile / PWA</span>
           </button>
-          <span className="text-zinc-700">|</span>
-          <button onClick={() => onNavigate('home')} className="hover:text-white transition">
+          <span className="text-zinc-700 hidden sm:inline">|</span>
+          <button type="button" onClick={() => onNavigate('home')} className="hover:text-white transition">
             Termos de Uso
           </button>
-          <button onClick={() => onNavigate('home')} className="hover:text-white transition">
+          <button type="button" onClick={() => onNavigate('home')} className="hover:text-white transition">
             Privacidade
           </button>
-          <button onClick={() => onNavigate('home')} className="hover:text-white transition">
+          <button type="button" onClick={() => onNavigate('home')} className="hover:text-white transition">
             Suporte
-          </button>
-          <span className="text-zinc-700">|</span>
-          <button
-            onClick={() => onNavigate('admin_dashboard')}
-            className="text-zinc-500 hover:text-[#FF1A2D] transition flex items-center gap-1"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            PX CONTROL
           </button>
         </div>
 

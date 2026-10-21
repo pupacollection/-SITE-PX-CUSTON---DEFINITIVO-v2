@@ -70,19 +70,21 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white py-8 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-[#000000] text-white py-8 pb-24 md:pb-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto space-y-8">
         {/* Navigation & Share Bar */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <button
+            type="button"
             onClick={onBack}
             className="flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-white bg-[#141414] border border-[#2a2a2a] px-3.5 py-2 rounded-xl transition"
           >
-            <ArrowLeft className="w-4 h-4 text-[#FF1A2D]" />
+            <ArrowLeft className="w-4 h-4 text-[#FF1A2D] shrink-0" />
             <span>Voltar aos Eventos</span>
           </button>
 
           <button
+            type="button"
             onClick={() => {
               if (navigator.share) {
                 navigator.share({
@@ -92,16 +94,16 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
                 });
               }
             }}
-            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white bg-[#141414] border border-[#2a2a2a] px-3 py-2 rounded-xl"
+            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white bg-[#141414] border border-[#2a2a2a] px-3 py-2 rounded-xl shrink-0"
           >
-            <Share2 className="w-4 h-4 text-[#FF1A2D]" />
+            <Share2 className="w-4 h-4 text-[#FF1A2D] shrink-0" />
             <span>Compartilhar</span>
           </button>
         </div>
 
         {/* Hero Banner / Gallery Showcase */}
         <div className="relative rounded-3xl overflow-hidden border border-[#262626] bg-[#111111]">
-          <div className="relative h-72 sm:h-96 w-full">
+          <div className="relative h-64 sm:h-96 w-full">
             <img
               src={event.cover_image}
               alt={event.title}
@@ -110,7 +112,7 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
             <div className="absolute inset-0 bg-gradient-to-t from-[#111111] via-[#111111]/60 to-transparent" />
             
             {/* Badges */}
-            <div className="absolute top-4 left-4 flex items-center gap-2">
+            <div className="absolute top-4 left-4 right-4 flex flex-wrap items-center gap-2">
               {event.is_demo ? (
                 <span className="bg-amber-600 text-white text-xs font-black uppercase tracking-widest px-3 py-1 rounded-lg shadow-lg">
                   Homologação Técnica (DEMO)
@@ -127,7 +129,7 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
           </div>
 
           {/* Event Header Info */}
-          <div className="p-6 sm:p-8 -mt-16 relative z-10">
+          <div className="p-5 sm:p-8 -mt-12 sm:-mt-16 relative z-10">
             {event.is_demo && (
               <div className="mb-6 bg-amber-950/40 border border-amber-500/40 rounded-2xl p-4 flex items-center gap-3 text-amber-200 text-xs">
                 <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
@@ -141,23 +143,23 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
             )}
 
             <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
-              <div>
-                <h1 className="text-2xl sm:text-4xl font-black uppercase tracking-tight text-white font-heading">
+              <div className="min-w-0">
+                <h1 className="text-2xl sm:text-4xl font-black uppercase tracking-tight text-white font-heading break-words">
                   {event.title}
                 </h1>
-                <div className="flex flex-wrap items-center gap-4 text-xs sm:text-sm text-zinc-300 mt-3">
+                <div className="flex flex-wrap items-center gap-2.5 sm:gap-4 text-xs sm:text-sm text-zinc-300 mt-3">
                   <span className="flex items-center gap-1.5 bg-[#181818] px-3 py-1.5 rounded-lg border border-[#2a2a2a]">
-                    <Calendar className="w-4 h-4 text-[#FF1A2D]" />
-                    {event.formatted_date}
+                    <Calendar className="w-4 h-4 text-[#FF1A2D] shrink-0" />
+                    <span>{event.formatted_date}</span>
                   </span>
                   <span className="flex items-center gap-1.5 bg-[#181818] px-3 py-1.5 rounded-lg border border-[#2a2a2a]">
-                    <MapPin className="w-4 h-4 text-[#FF1A2D]" />
-                    {event.location} • {event.city}/{event.state}
+                    <MapPin className="w-4 h-4 text-[#FF1A2D] shrink-0" />
+                    <span>{event.location} • {event.city}/{event.state}</span>
                   </span>
                 </div>
               </div>
 
-              <div className="bg-[#181818] border border-[#2a2a2a] p-4 rounded-2xl text-right shrink-0">
+              <div className="bg-[#181818] border border-[#2a2a2a] p-4 rounded-2xl text-left md:text-right shrink-0">
                 <span className="text-[11px] text-zinc-400 block">Lotes disponíveis a partir de</span>
                 <span className="text-2xl font-black text-[#FF1A2D]">
                   R$ {event.min_price.toFixed(2).replace('.', ',')}
@@ -206,8 +208,8 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
         </div>
 
         {/* Lotes de Ingressos (Screen 05 Core Feature) */}
-        <div className="bg-[#121212] border border-[#222] rounded-3xl p-6 sm:p-8">
-          <div className="flex items-center justify-between mb-6">
+        <div className="bg-[#121212] border border-[#222] rounded-3xl p-5 sm:p-8">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
             <div>
               <h2 className="text-xl font-black uppercase tracking-tight text-white font-heading">
                 Lotes de Ingressos Oficiais
@@ -217,7 +219,7 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
               </p>
             </div>
             {totalSelected > 0 && (
-              <span className="text-xs font-bold text-[#FF1A2D] bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 px-3 py-1 rounded-full">
+              <span className="text-xs font-bold text-[#FF1A2D] bg-[#FF1A2D]/10 border border-[#FF1A2D]/30 px-3 py-1 rounded-full w-fit shrink-0">
                 {totalSelected} {totalSelected === 1 ? 'ingresso' : 'ingressos'} selecionados
               </span>
             )}
@@ -235,14 +237,14 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
               return (
                 <div
                   key={batch.id}
-                  className={`bg-[#181818] border p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-5 transition ${
+                  className={`bg-[#181818] border p-4 sm:p-5 rounded-2xl flex flex-col lg:flex-row lg:items-center justify-between gap-4 sm:gap-5 transition ${
                     isUnavailable
                       ? 'border-[#222] opacity-60'
                       : 'border-[#262626] hover:border-[#383838]'
                   }`}
                 >
-                  <div className="max-w-md">
-                    <div className="flex items-center gap-2">
+                  <div className="max-w-md min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
                       <h3 className="text-base font-black uppercase text-white tracking-wide">
                         {batch.name}
                       </h3>
@@ -273,42 +275,49 @@ export const EventDetailView: React.FC<EventDetailViewProps> = ({
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-6">
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3 sm:gap-5 pt-3 lg:pt-0 border-t lg:border-t-0 border-[#242424]">
                     <div className="text-left sm:text-right">
                       <span className="text-[10px] text-zinc-400 block uppercase">Valor Unitário</span>
-                      <span className="text-lg font-black text-[#FF1A2D]">
+                      <span className="text-lg font-black text-[#FF1A2D] whitespace-nowrap">
                         R$ {Number(batch.price).toFixed(2).replace('.', ',')}
                       </span>
                     </div>
 
-                    {/* Quantity Selector [- 0 +] */}
-                    <div className="flex items-center bg-[#121212] border border-[#2a2a2a] rounded-xl p-1">
+                    <div className="flex items-center gap-2.5 sm:gap-4 ml-auto sm:ml-0">
+                      {/* Quantity Selector [- 0 +] */}
+                      <div className="flex items-center bg-[#121212] border border-[#2a2a2a] rounded-xl p-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity(batch.id, -1)}
+                          disabled={isUnavailable}
+                          aria-label="Diminuir quantidade"
+                          className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="w-8 sm:w-10 text-center font-bold text-xs text-white">
+                          {isUnavailable ? 0 : qty}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity(batch.id, 1)}
+                          disabled={isUnavailable || qty >= batch.available_quantity}
+                          aria-label="Aumentar quantidade"
+                          className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
                       <button
-                        onClick={() => updateQuantity(batch.id, -1)}
+                        type="button"
+                        onClick={() => handleBuy(batch)}
                         disabled={isUnavailable}
-                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
+                        className="bg-[#FF1A2D] hover:bg-[#e00f21] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold uppercase tracking-wider px-4 sm:px-5 py-3 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition shrink-0"
                       >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="w-10 text-center font-bold text-xs text-white">
-                        {isUnavailable ? 0 : qty}
-                      </span>
-                      <button
-                        onClick={() => updateQuantity(batch.id, 1)}
-                        disabled={isUnavailable || qty >= batch.available_quantity}
-                        className="w-8 h-8 rounded-lg bg-[#181818] hover:bg-[#222] disabled:opacity-30 disabled:cursor-not-allowed text-zinc-300 flex items-center justify-center transition"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
+                        {isSoldOut ? 'Esgotado' : isUnavailable ? 'Indisponível' : 'Comprar'}
                       </button>
                     </div>
-
-                    <button
-                      onClick={() => handleBuy(batch)}
-                      disabled={isUnavailable}
-                      className="bg-[#FF1A2D] hover:bg-[#e00f21] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-xl shadow-[0_0_15px_rgba(255,26,45,0.4)] transition shrink-0"
-                    >
-                      {isSoldOut ? 'Esgotado' : isUnavailable ? 'Indisponível' : 'Comprar'}
-                    </button>
                   </div>
                 </div>
               );
