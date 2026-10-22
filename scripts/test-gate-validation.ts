@@ -11,6 +11,7 @@ import { validateStagingEnvironment, runPostgresHomologationTests } from './test
 import { runRuntimeTests } from './test-api-runtime';
 import { evaluateTicketValidationOutcome } from '../src/lib/ticketValidator';
 import { evaluateUserRoleChangePolicy, mergeAuthUserMetadata } from '../src/lib/userRoleValidator';
+import { runOrderConfirmationEmailTests } from './test-order-confirmation-email';
 
 async function runGateValidationTests() {
   console.log('==============================================================================');
@@ -557,6 +558,16 @@ async function runGateValidationTests() {
 
   console.log(`Gate Teste 15 (Matriz de Segurança RBAC e Gestão de Usuários): ${test15Ok ? '✅ APROVADO (Hierarquia ADMIN/SUPER_ADMIN, proteção do último SUPER_ADMIN e preservação de metadados validadas)' : '❌ FALHOU'}`);
   if (test15Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 16: Confirmação de Compra por E-mail (Idempotência, Isolamento SMTP e Retentativa)
+  // --------------------------------------------------------------------------
+  totalTests++;
+  const emailSuite = await runOrderConfirmationEmailTests();
+  const test16Ok = emailSuite.allPassed && emailSuite.passed === 7;
+
+  console.log(`Gate Teste 16 (E-mail de Confirmação Idempotente e Isolamento SMTP): ${test16Ok ? '✅ APROVADO (Envio pós-emissão, idempotência entre processos, isolamento de falha SMTP e retentativa validados)' : '❌ FALHOU'}`);
+  if (test16Ok) passedTests++;
 
   // Restaurar ambiente original
   if (originalUrl) process.env.STAGING_SUPABASE_URL = originalUrl;

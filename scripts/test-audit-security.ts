@@ -38,13 +38,14 @@ async function runSecurityAuditTests() {
   assert(combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.orders') < combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.order_items'), 'Tabela orders criada antes de order_items (dependência FK)');
   assert(combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.ticket_batches') < combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.tickets'), 'Tabela ticket_batches criada antes de tickets (dependência FK)');
   assert(combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.tickets') < combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.checkins'), 'Tabela tickets criada antes de checkins (dependência FK)');
+  assert(combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.orders') < combinedSql.indexOf('CREATE TABLE IF NOT EXISTS public.order_email_notifications'), 'Tabela orders criada antes de order_email_notifications (dependência FK)');
 
   // TESTE 2: Habilitação de RLS em 100% das Tabelas
   console.log('\n2️⃣ Testando Cobertura de Row Level Security (RLS)...');
   const tables = [
     'profiles', 'vehicles', 'events', 'ticket_batches',
     'orders', 'order_items', 'payments', 'tickets',
-    'checkins', 'checkin_devices', 'audit_logs'
+    'checkins', 'checkin_devices', 'audit_logs', 'order_email_notifications'
   ];
 
   for (const t of tables) {

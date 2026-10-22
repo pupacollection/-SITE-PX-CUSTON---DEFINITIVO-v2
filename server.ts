@@ -16,6 +16,7 @@ import {
   mergeAuthUserMetadata,
   VALID_USER_ROLES,
 } from './src/lib/userRoleValidator';
+import { sendOrderConfirmationEmailIfNeeded } from './src/lib/orderConfirmationMailer';
 
 dotenv.config();
 
@@ -1789,11 +1790,22 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         p_order_id: officialOrderId,
         p_mercado_pago_id: String(paymentId),
       });
+
+      // Garantir envio idempotente do e-mail (ignora se já enviado; retenta se tentativa anterior falhou)
+      const repeatEmailResult = await sendOrderConfirmationEmailIfNeeded({
+        orderId: officialOrderId,
+        paymentId: String(paymentId),
+        supabaseAdmin,
+        fallbackOrder: ordersStore.get(officialOrderId) || null,
+        mpPayerEmail: mpData?.payer?.email || null,
+      });
+
       return res.status(200).json({
         received: true,
         already_approved: true,
         order_id: officialOrderId,
         status: 'approved',
+        email_notification: repeatEmailResult.status,
       });
     }
 
@@ -1826,8 +1838,9 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
       }
     );
 
-    if (confirmErr) {
-      console.error('[PX CUSTON Webhook] Falha ao confirmar pedido via RPC:', confirmErr.message);
+    if (confirmErr || confirmResult?.success === false) {
+      const errReason = confirmErr?.message || confirmResult?.error || 'Erro desconhecido na RPC';
+      console.error('[PX CUSTON Webhook] Falha ao confirmar pedido via RPC:', errReason);
       return res.status(500).json({ error: 'Falha ao processar confirmação de pagamento no banco.' });
     }
 
@@ -1835,7 +1848,23 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     if (cached) cached.payment_status = 'approved';
 
     console.log(`[PX CUSTON Webhook] Pedido ${officialOrderId} aprovado com sucesso! Ingressos emitidos.`);
-    return res.status(200).json({ received: true, order_id: officialOrderId, status: 'approved' });
+
+    // 10. Envio Automático, Idempotente e Tolerante a Falhas do E-mail de Confirmação
+    // Falhas de SMTP nunca desfazem o pagamento aprovado nem invalidam os ingressos já emitidos
+    const emailResult = await sendOrderConfirmationEmailIfNeeded({
+      orderId: officialOrderId,
+      paymentId: String(paymentId),
+      supabaseAdmin,
+      fallbackOrder: cached || null,
+      mpPayerEmail: mpData?.payer?.email || null,
+    });
+
+    return res.status(200).json({
+      received: true,
+      order_id: officialOrderId,
+      status: 'approved',
+      email_notification: emailResult.status,
+    });
   }
 
   if (officialStatus === 'rejected' || officialStatus === 'cancelled') {
