@@ -9,7 +9,12 @@
 
 import { validateStagingEnvironment, runPostgresHomologationTests } from './test-homologation-postgres';
 import { runRuntimeTests } from './test-api-runtime';
-import { evaluateTicketValidationOutcome } from '../src/lib/ticketValidator';
+import {
+  evaluateTicketValidationOutcome,
+  executeAuthenticatedTicketValidation,
+  evaluateOrderCancellationOutcome,
+  verifyOrderIdempotencyMatch,
+} from '../src/lib/ticketValidator';
 import { evaluateUserRoleChangePolicy, mergeAuthUserMetadata } from '../src/lib/userRoleValidator';
 import { runOrderConfirmationEmailTests } from './test-order-confirmation-email';
 
@@ -180,36 +185,74 @@ async function runGateValidationTests() {
   // TESTE 8: Cenário Falho Impede o Relatório de Sucesso Geral
   // --------------------------------------------------------------------------
   totalTests++;
-  // Se 1 cenário dos 18 falhar, o status NUNCA pode ser 'PASSED'
+  // Se exatamente 1 cenário dos 21 falhar (Cenário 10: /api/admin/init-super-admin),
+  // o status NUNCA pode ser 'PASSED' e o contador deve registrar 20/21 (failed === 1).
   const mockSingleFailureRequester = async (options: any, postData?: any) => {
     if (options.path === '/api/admin/init-super-admin') {
-      // Retorna 200 em vez do esperado 403 (falha de segurança proposital para testar detecção)
+      // Retorna 200 em vez do esperado 403 (falha de segurança proposital única para testar detecção)
       return { statusCode: 200, data: { success: true } };
     }
-    // Para os outros, retornar status padrão esperado
-    if (options.path === '/api/tickets/validate' && postData?.code === 'INVALIDO-999') return { statusCode: 404, data: { valid: false } };
-    if (options.path === '/api/tickets/validate' && postData?.code === 'PX-7AI89C10' && postData?.reset_demo) return { statusCode: 409, data: { valid: false, status: 'already_used' } };
-    if (options.path === '/api/tickets/validate' && postData?.code === 'PX-7AI89C10') return { statusCode: 200, data: { valid: true, status: 'success' } };
-    if (options.path === '/api/admin/tickets/reset-demo' && !options.headers?.Authorization) return { statusCode: 401, data: { error: 'Cabeçalho de autorização não fornecido' } };
-    if (options.path === '/api/admin/tickets/reset-demo' && options.headers?.Authorization?.includes('token_invalido')) return { statusCode: 403, data: { error: 'Token inválido' } };
-    if (options.path === '/api/admin/tickets/reset-demo' && options.headers?.Authorization?.includes('px_custom_super_admin_bootstrap_secret_2026_secure')) return { statusCode: 403, data: { error: 'Segredo antigo rejeitado' } };
-    if (options.path === '/api/admin/tickets/reset-demo') return { statusCode: 200, data: { success: true, reset: true } };
-    if (options.path === '/api/orders/create' && postData?.is_demo) return { statusCode: 400, data: { is_demo: true } };
-    if (options.path === '/api/orders/create' && postData?.items?.length === 0) return { statusCode: 400, data: { error: 'Itens vazios' } };
-    if (options.path?.includes('/status')) return { statusCode: 404, data: { error: 'Não encontrado' } };
-    if (options.path === '/api/payments/webhook') return { statusCode: 200, data: { received: true } };
-    if (options.path === '/api/admin/orders/expire-pending') return { statusCode: 401, data: { error: 'Não autorizado' } };
+    // Para todos os demais 20 cenários, retornar exatamente o contrato esperado pela suíte de runtime:
+    if (options.path === '/api/tickets/validate' && postData?.code === 'INVALIDO-999') {
+      return { statusCode: 401, data: { valid: false, status: 'unauthorized' } };
+    }
+    if (options.path === '/api/tickets/validate' && postData?.code === 'PX-7AI89C10' && postData?.reset_demo) {
+      return { statusCode: 401, data: { valid: false, status: 'unauthorized' } };
+    }
+    if (options.path === '/api/tickets/validate' && options.headers?.Authorization?.includes('token_jwt_invalido')) {
+      return { statusCode: 401, data: { valid: false, status: 'unauthorized' } };
+    }
+    if (options.path === '/api/tickets/validate' && options.headers?.Authorization?.includes('valid_operator_token')) {
+      // No modo customRequester (Cenário 9), operador autenticado espera 200 com status: 'success'
+      return { statusCode: 200, data: { valid: true, status: 'success', code: 'PX-7AI89C10' } };
+    }
+    if (options.path === '/api/tickets/validate' && postData?.code === 'PX-7AI89C10') {
+      // Cenário 2 (visitante sem token): retorna 401
+      return { statusCode: 401, data: { valid: false, status: 'unauthorized' } };
+    }
+    if (options.path === '/api/admin/tickets/reset-demo' && !options.headers?.Authorization) {
+      return { statusCode: 401, data: { error: 'Cabeçalho de autorização não fornecido' } };
+    }
+    if (options.path === '/api/admin/tickets/reset-demo' && options.headers?.Authorization?.includes('token_invalido')) {
+      return { statusCode: 403, data: { error: 'Token inválido' } };
+    }
+    if (options.path === '/api/admin/tickets/reset-demo' && options.headers?.Authorization?.includes('px_custom_super_admin_bootstrap_secret_2026_secure')) {
+      return { statusCode: 403, data: { error: 'Segredo antigo rejeitado' } };
+    }
+    if (options.path === '/api/admin/tickets/reset-demo') {
+      return { statusCode: 200, data: { success: true, reset: true } };
+    }
+    if (options.path === '/api/orders/create' && postData?.event_id === 'evt-mega-encontro-2025') {
+      return { statusCode: 400, data: { is_demo: true } };
+    }
+    if (options.path === '/api/orders/create' && postData?.items?.length === 0) {
+      return { statusCode: 400, data: { error: 'Itens vazios' } };
+    }
+    if (options.path?.includes('/status')) {
+      return { statusCode: 404, data: { error: 'Não encontrado' } };
+    }
+    if (options.path === '/api/payments/webhook') {
+      return { statusCode: 200, data: { received: true } };
+    }
+    if (options.path === '/api/admin/orders/expire-pending') {
+      return { statusCode: 401, data: { error: 'Não autorizado' } };
+    }
     if (options.path === '/api/admin/users' || options.path?.includes('/api/admin/users/') || options.path === '/api/admin/promote-user') {
       return { statusCode: 401, data: { error: 'Token de autenticação não fornecido ou inválido.' } };
     }
-    if (options.path === '/api/orders/create') return { statusCode: 503, data: { error: 'RPC Indisponível' } };
-    return { statusCode: 200, data: { valid: true, code: 'PX-4M29L8X1' } };
+    if (options.path === '/api/orders/create') {
+      return { statusCode: 503, data: { error: 'Serviço de checkout temporariamente indisponível' } };
+    }
+    return { statusCode: 200, data: { valid: true, status: 'success', code: 'PX-4M29L8X1' } };
   };
 
   const summarySingleFailure = await runRuntimeTests(mockSingleFailureRequester);
-  const test8Ok = summarySingleFailure.status === 'FAILED' && summarySingleFailure.passed < summarySingleFailure.total;
+  const test8Ok =
+    summarySingleFailure.status === 'FAILED' &&
+    summarySingleFailure.failed === 1 &&
+    summarySingleFailure.passed === summarySingleFailure.total - 1;
 
-  console.log(`Gate Teste 8 (Cenário falho bloqueia aprovação geral): ${test8Ok ? '✅ APROVADO (Nenhum falso positivo gerado)' : '❌ FALHOU'}`);
+  console.log(`Gate Teste 8 (Cenário falho único 20/21 bloqueia aprovação geral): ${test8Ok ? '✅ APROVADO (Exatamente 1 falha injetada detectada, nenhum falso positivo gerado)' : '❌ FALHOU'}`);
   if (test8Ok) passedTests++;
 
   // --------------------------------------------------------------------------
@@ -568,6 +611,225 @@ async function runGateValidationTests() {
 
   console.log(`Gate Teste 16 (E-mail de Confirmação Idempotente e Isolamento SMTP): ${test16Ok ? '✅ APROVADO (Envio pós-emissão, idempotência entre processos, isolamento de falha SMTP e retentativa validados)' : '❌ FALHOU'}`);
   if (test16Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 17: Autorização de Check-in (401/403/200), Anti-Spoofing de Operador e Cancelamento Transacional
+  // --------------------------------------------------------------------------
+  totalTests++;
+  const gateDemoMap = new Map<string, any>();
+  let recordedOperatorIds: string[] = [];
+
+  const createGateCheckinClient = (authValid: boolean, role: string | null, userId = 'op-auth-100') => ({
+    auth: {
+      getUser: async () =>
+        authValid
+          ? { data: { user: { id: userId } }, error: null }
+          : { data: { user: null }, error: { message: 'Unauthorized' } },
+    },
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: role ? { id: userId, role } : null,
+            error: null,
+          }),
+        }),
+      }),
+    }),
+    rpc: async (_fn: string, params: any) => {
+      recordedOperatorIds.push(params.p_operator_id);
+      return {
+        data: {
+          success: true,
+          status: 'success',
+          code: params.p_code,
+          event: 'MEGA ENCONTRO PX CUSTON',
+          holder: 'Portador Real',
+          batch: 'VIP',
+          timestamp: '2026-10-22T20:00:00Z',
+        },
+        error: null,
+      };
+    },
+  });
+
+  // 1) Visitante sem token -> 401
+  const gateUnauth = await executeAuthenticatedTicketValidation({
+    authHeader: undefined,
+    code: 'PX-99887766',
+    clientOperatorId: 'spoofed-id',
+    supabaseClient: createGateCheckinClient(false, null),
+    isProduction: true,
+    demoUsedMap: gateDemoMap,
+  });
+
+  // 2) Usuário comum autenticado (USER) -> 403
+  const gateUserForbidden = await executeAuthenticatedTicketValidation({
+    authHeader: 'Bearer valid_user_token',
+    code: 'PX-99887766',
+    clientOperatorId: 'spoofed-id',
+    supabaseClient: createGateCheckinClient(true, 'USER', 'common-user-id'),
+    isProduction: true,
+    demoUsedMap: gateDemoMap,
+  });
+
+  // 3) Operador autorizado (CHECKIN_OPERATOR) -> 200 e ignora clientOperatorId
+  const gateOperatorAllowed = await executeAuthenticatedTicketValidation({
+    authHeader: 'Bearer valid_operator_token',
+    code: 'PX-99887766',
+    clientOperatorId: 'attacker-forged-operator-id',
+    supabaseClient: createGateCheckinClient(true, 'CHECKIN_OPERATOR', 'real-operator-id-555'),
+    isProduction: true,
+    demoUsedMap: gateDemoMap,
+  });
+
+  // 4) Falha na RPC de cancelamento -> 503, não marca cancelled e não informa liberação de estoque
+  const gateCancelFail = evaluateOrderCancellationOutcome({
+    rpcResult: null,
+    rpcError: { message: 'RPC timeout' },
+    orderId: 'ord-test-fail',
+    currentStatus: 'pending',
+    total: 120,
+  });
+
+  // 5) Pedido já aprovado -> 200 status=approved, nunca cancelado por consulta ou webhook concorrente
+  const gateCancelApproved = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: false,
+      status: 'approved',
+      error: 'Operação bloqueada: Pedido aprovado não pode ser cancelado.',
+    },
+    rpcError: null,
+    orderId: 'ord-test-approved',
+    currentStatus: 'pending',
+    total: 120,
+  });
+
+  // 6) Cancelamento confirmado pela RPC -> 200 status=cancelled, stock_released=true
+  const gateCancelSuccess = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: true,
+      order_id: 'ord-test-ok',
+      status: 'cancelled',
+      released_items_count: 3,
+      reason: 'expired_timeout',
+    },
+    rpcError: null,
+    orderId: 'ord-test-ok',
+    currentStatus: 'pending',
+    total: 120,
+  });
+
+  // 7) Pedidos refunded e in_process -> 409 operation_refused, sem cancelar e sem liberar estoque
+  const gateCancelRefunded = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: false,
+      status: 'refunded',
+      error: 'Operação bloqueada: Pedidos com status "refunded" não podem ser cancelados por esta rotina.',
+    },
+    rpcError: null,
+    orderId: 'ord-test-refunded',
+    currentStatus: 'refunded',
+    total: 120,
+  });
+
+  const gateCancelInProcess = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: false,
+      status: 'in_process',
+      error: 'Operação bloqueada: Pedidos com status "in_process" não podem ser cancelados por esta rotina.',
+    },
+    rpcError: null,
+    orderId: 'ord-test-inprocess',
+    currentStatus: 'in_process',
+    total: 120,
+  });
+
+  // 8) Pedido já cancelado anteriormente -> 200 already_cancelled=true, stockReleased=false (não duplica devolução de estoque)
+  const gateCancelAlreadyCancelled = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: true,
+      already_cancelled: true,
+      order_id: 'ord-test-already-cancelled',
+      status: 'cancelled',
+      released_items_count: 0,
+    },
+    rpcError: null,
+    orderId: 'ord-test-already-cancelled',
+    currentStatus: 'cancelled',
+    total: 120,
+  });
+
+  // 9) Idempotência de process_order_checkout: retry compatível vs conflito de itens/evento/comprador
+  const gateIdemOk = verifyOrderIdempotencyMatch({
+    existingOrder: {
+      id: 'ord-idem-gate-1',
+      user_id: 'usr-gate-1',
+      event_id: 'evt-gate-1',
+      payment_method: 'pix',
+      items: [{ batch_id: 'b-1', quantity: 2 }],
+    },
+    requestedUserId: 'usr-gate-1',
+    requestedEventId: 'evt-gate-1',
+    requestedPaymentMethod: 'pix',
+    requestedItems: [
+      { batch_id: 'b-1', quantity: 1 },
+      { batch_id: 'b-1', quantity: 1 },
+    ],
+  });
+
+  const gateIdemConflict = verifyOrderIdempotencyMatch({
+    existingOrder: {
+      id: 'ord-idem-gate-1',
+      user_id: 'usr-gate-1',
+      event_id: 'evt-gate-1',
+      payment_method: 'pix',
+      items: [{ batch_id: 'b-1', quantity: 2 }],
+    },
+    requestedUserId: 'usr-gate-1',
+    requestedEventId: 'evt-gate-1',
+    requestedPaymentMethod: 'pix',
+    requestedItems: [{ batch_id: 'b-2', quantity: 1 }],
+  });
+
+  const test17Ok =
+    gateUnauth.statusCode === 401 &&
+    !gateUnauth.payload.valid &&
+    gateUserForbidden.statusCode === 403 &&
+    !gateUserForbidden.payload.valid &&
+    gateOperatorAllowed.statusCode === 200 &&
+    gateOperatorAllowed.payload.valid === true &&
+    recordedOperatorIds.length === 1 &&
+    recordedOperatorIds[0] === 'real-operator-id-555' &&
+    gateCancelFail.statusCode === 503 &&
+    gateCancelFail.cancelled === false &&
+    gateCancelFail.stockReleased === false &&
+    gateCancelFail.payload.status === 'pending' &&
+    gateCancelApproved.statusCode === 200 &&
+    gateCancelApproved.outcome === 'already_approved' &&
+    gateCancelApproved.cancelled === false &&
+    gateCancelApproved.stockReleased === false &&
+    gateCancelApproved.payload.status === 'approved' &&
+    gateCancelSuccess.statusCode === 200 &&
+    gateCancelSuccess.cancelled === true &&
+    gateCancelSuccess.stockReleased === true &&
+    gateCancelSuccess.payload.status === 'cancelled' &&
+    gateCancelRefunded.statusCode === 409 &&
+    gateCancelRefunded.cancelled === false &&
+    gateCancelRefunded.stockReleased === false &&
+    gateCancelInProcess.statusCode === 409 &&
+    gateCancelInProcess.cancelled === false &&
+    gateCancelInProcess.stockReleased === false &&
+    gateCancelAlreadyCancelled.statusCode === 200 &&
+    gateCancelAlreadyCancelled.outcome === 'already_cancelled' &&
+    gateCancelAlreadyCancelled.cancelled === true &&
+    gateCancelAlreadyCancelled.stockReleased === false &&
+    gateIdemOk.compatible === true &&
+    gateIdemConflict.compatible === false &&
+    gateIdemConflict.conflictReason === 'items_mismatch';
+
+  console.log(`Gate Teste 17 (Autorização Check-in, Anti-Spoofing, Idempotência e Cancelamento Transacional): ${test17Ok ? '✅ APROVADO (Visitante 401, USER 403, Operador 200 com ID autenticado, idempotência estrita e proteção de status approved/refunded/in_process/cancelled)' : '❌ FALHOU'}`);
+  if (test17Ok) passedTests++;
 
   // Restaurar ambiente original
   if (originalUrl) process.env.STAGING_SUPABASE_URL = originalUrl;

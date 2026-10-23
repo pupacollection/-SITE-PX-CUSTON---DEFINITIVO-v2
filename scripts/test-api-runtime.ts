@@ -10,6 +10,10 @@
  */
 
 import http from 'http';
+import {
+  executeAuthenticatedTicketValidation,
+  evaluateOrderCancellationOutcome,
+} from '../src/lib/ticketValidator';
 
 export interface ApiTestResult {
   id: number;
@@ -148,12 +152,12 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   }
 
   // --------------------------------------------------------------------------
-  // Cenário 1: Ingresso inexistente deve retornar HTTP 404
+  // Cenário 1: Visitante sem token em /api/tickets/validate deve retornar HTTP 401
   // --------------------------------------------------------------------------
   await executeScenario(
     1,
-    'Validação de ingresso inexistente',
-    404,
+    'Segurança Check-in: Visitante não autenticado bloqueado em /api/tickets/validate (HTTP 401)',
+    401,
     () => requester({
       hostname: 'localhost',
       port: 3000,
@@ -161,16 +165,16 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, { code: 'INVALIDO-999' }),
-    (data) => data && data.valid === false
+    (data) => data && data.valid === false && data.status === 'unauthorized'
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 2: Primeiro check-in de ingresso válido (PX-7AI89C10) deve retornar HTTP 200
+  // Cenário 2: Visitante sem token não consegue consumir ingresso válido (PX-7AI89C10) -> HTTP 401
   // --------------------------------------------------------------------------
   await executeScenario(
     2,
-    'Primeiro Check-in de ingresso válido (PX-7AI89C10)',
-    200,
+    'Segurança Check-in: Visitante sem token não consegue consumir ingresso válido (HTTP 401)',
+    401,
     () => requester({
       hostname: 'localhost',
       port: 3000,
@@ -178,41 +182,48 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }, { code: 'PX-7AI89C10' }),
-    (data) => data && data.valid === true && data.status === 'success'
+    (data) => data && data.valid === false && data.status === 'unauthorized'
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 3: Segundo check-in do mesmo ingresso deve ser bloqueado com HTTP 409 (Anti-Fraude)
+  // Cenário 3: Token inválido ou expirado em /api/tickets/validate é rejeitado com HTTP 401
   // --------------------------------------------------------------------------
   await executeScenario(
     3,
-    'Anti-Fraude: Segundo Check-in com o mesmo ingresso',
-    409,
+    'Segurança Check-in: Token JWT inválido em /api/tickets/validate é rejeitado (HTTP 401)',
+    401,
     () => requester({
       hostname: 'localhost',
       port: 3000,
       path: '/api/tickets/validate',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer token_jwt_invalido_visitante_123',
+      },
     }, { code: 'PX-7AI89C10' }),
-    (data) => data && data.valid === false && data.status === 'already_used'
+    (data) => data && data.valid === false && data.status === 'unauthorized'
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 4: SEGURANÇA: Requisição pública com reset_demo: true NÃO reseta ingresso e retorna 409
+  // Cenário 4: SEGURANÇA: Tentativa de injetar operator_id ou reset_demo sem sessão válida retorna 401
   // --------------------------------------------------------------------------
   await executeScenario(
     4,
-    'Segurança: Requisição pública com reset_demo: true é rejeitada e ingresso continua bloqueado',
-    409,
+    'Segurança Check-in: Spoofing de operator_id e reset_demo sem autenticação é rejeitado (HTTP 401)',
+    401,
     () => requester({
       hostname: 'localhost',
       port: 3000,
       path: '/api/tickets/validate',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-7AI89C10', reset_demo: true }),
-    (data) => data && data.valid === false && data.status === 'already_used'
+    }, {
+      code: 'PX-7AI89C10',
+      operator_id: '11111111-1111-4111-8111-111111111111',
+      reset_demo: true,
+    }),
+    (data) => data && data.valid === false && data.status === 'unauthorized'
   );
 
   // --------------------------------------------------------------------------
@@ -293,19 +304,89 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 9: Revalidação após reset autorizado: ingresso volta a ser aceito com HTTP 200
+  // Cenário 9: Operador autorizado (CHECKIN_OPERATOR) valida ingresso (200), bloqueia 2ª leitura (409) e USER comum recebe 403
   // --------------------------------------------------------------------------
   await executeScenario(
     9,
-    'Validação normal: Ingresso volta a ser aceito após redefinição administrativa autorizada',
+    'Autorização RBAC Check-in: Operador autorizado valida ingresso (200/409) e USER comum é bloqueado (403)',
     200,
-    () => requester({
-      hostname: 'localhost',
-      port: 3000,
-      path: '/api/tickets/validate',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX-7AI89C10' }),
+    async () => {
+      if (customRequester) {
+        return requester({
+          hostname: 'localhost',
+          port: 3000,
+          path: '/api/tickets/validate',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer valid_operator_token',
+          },
+        }, { code: 'PX-7AI89C10' });
+      }
+
+      const localDemoMap = new Map<string, any>();
+      let usedIds: string[] = [];
+      const makeClient = (role: string, userId: string) => ({
+        auth: {
+          getUser: async () => ({ data: { user: { id: userId } }, error: null }),
+        },
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({ data: { id: userId, role }, error: null }),
+            }),
+          }),
+        }),
+        rpc: async (_fn: string, params: any) => {
+          usedIds.push(params.p_operator_id);
+          return { data: { status: 'not_found' }, error: null };
+        },
+      });
+
+      // 1) Usuário comum autenticado (USER) tentando validar ingresso -> deve ser bloqueado com 403
+      const userAttempt = await executeAuthenticatedTicketValidation({
+        authHeader: 'Bearer user_jwt_token',
+        code: 'PX-7AI89C10',
+        clientOperatorId: 'spoofed-operator-id',
+        supabaseClient: makeClient('USER', 'user-common-uuid'),
+        isProduction: false,
+        demoUsedMap: localDemoMap,
+      });
+
+      // 2) Operador autorizado (CHECKIN_OPERATOR) validando ingresso (1ª leitura -> 200)
+      const opFirstScan = await executeAuthenticatedTicketValidation({
+        authHeader: 'Bearer operator_jwt_token',
+        code: 'PX-7AI89C10',
+        clientOperatorId: 'spoofed-operator-id',
+        supabaseClient: makeClient('CHECKIN_OPERATOR', 'operator-verified-uuid'),
+        isProduction: false,
+        demoUsedMap: localDemoMap,
+      });
+
+      // 3) Operador autorizado (CHECKIN_OPERATOR) tentando 2ª leitura do mesmo ingresso -> 409
+      const opSecondScan = await executeAuthenticatedTicketValidation({
+        authHeader: 'Bearer operator_jwt_token',
+        code: 'PX-7AI89C10',
+        clientOperatorId: 'spoofed-operator-id',
+        supabaseClient: makeClient('CHECKIN_OPERATOR', 'operator-verified-uuid'),
+        isProduction: false,
+        demoUsedMap: localDemoMap,
+      });
+
+      const allChecksOk =
+        userAttempt.statusCode === 403 &&
+        opFirstScan.statusCode === 200 &&
+        opFirstScan.payload.valid === true &&
+        opSecondScan.statusCode === 409 &&
+        opSecondScan.payload.status === 'already_used' &&
+        usedIds.length === 2 &&
+        usedIds.every((id) => id === 'operator-verified-uuid');
+
+      return {
+        statusCode: allChecksOk ? 200 : 500,
+        data: opFirstScan.payload,
+      };
+    },
     (data) => data && data.valid === true && data.status === 'success'
   );
 
@@ -445,19 +526,76 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
-  // Cenário 17: Extração e validação de QR Payload completo no check-in
+  // Cenário 17: Extração de QR Payload completo por operador autorizado e proteção de cancelamento/estoque
   // --------------------------------------------------------------------------
   await executeScenario(
     17,
-    'Extração e validação de QR Payload completo',
+    'Extração de QR Payload completo por operador autorizado e proteção de cancelamento/estoque',
     200,
-    () => requester({
-      hostname: 'localhost',
-      port: 3000,
-      path: '/api/tickets/validate',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    }, { code: 'PX:PX-4M29L8X1:1111-2222-3333' }),
+    async () => {
+      if (customRequester) {
+        return requester({
+          hostname: 'localhost',
+          port: 3000,
+          path: '/api/tickets/validate',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }, { code: 'PX:PX-4M29L8X1:1111-2222-3333' });
+      }
+
+      const localDemoMap = new Map<string, any>();
+      const adminClient = {
+        auth: {
+          getUser: async () => ({ data: { user: { id: 'admin-verified-uuid' } }, error: null }),
+        },
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({ data: { id: 'admin-verified-uuid', role: 'ADMIN' }, error: null }),
+            }),
+          }),
+        }),
+        rpc: async () => ({ data: { status: 'not_found' }, error: null }),
+      };
+
+      const qrValidation = await executeAuthenticatedTicketValidation({
+        authHeader: 'Bearer admin_jwt_token',
+        code: 'PX:PX-4M29L8X1:1111-2222-3333',
+        supabaseClient: adminClient,
+        isProduction: false,
+        demoUsedMap: localDemoMap,
+      });
+
+      // Verificar também que falha na RPC de cancelamento não marca cancelled e pedido aprovado não é cancelado
+      const rpcFailEval = evaluateOrderCancellationOutcome({
+        rpcResult: null,
+        rpcError: { message: 'RPC Error' },
+        orderId: 'ord-1',
+        currentStatus: 'pending',
+      });
+      const approvedEval = evaluateOrderCancellationOutcome({
+        rpcResult: { success: false, status: 'approved', error: 'Already approved' },
+        rpcError: null,
+        orderId: 'ord-2',
+        currentStatus: 'pending',
+      });
+
+      const ok =
+        qrValidation.statusCode === 200 &&
+        qrValidation.payload.code === 'PX-4M29L8X1' &&
+        rpcFailEval.statusCode === 503 &&
+        rpcFailEval.cancelled === false &&
+        rpcFailEval.stockReleased === false &&
+        approvedEval.statusCode === 200 &&
+        approvedEval.outcome === 'already_approved' &&
+        approvedEval.cancelled === false &&
+        approvedEval.stockReleased === false;
+
+      return {
+        statusCode: ok ? 200 : 500,
+        data: qrValidation.payload,
+      };
+    },
     (data) => data && data.valid === true && data.code === 'PX-4M29L8X1'
   );
 

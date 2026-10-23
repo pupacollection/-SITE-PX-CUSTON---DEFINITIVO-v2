@@ -6,6 +6,11 @@ import {
   getRoleManagementPermissions,
   mergeAuthUserMetadata,
 } from '../src/lib/userRoleValidator';
+import {
+  executeAuthenticatedTicketValidation,
+  evaluateOrderCancellationOutcome,
+  verifyOrderIdempotencyMatch,
+} from '../src/lib/ticketValidator';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -225,6 +230,308 @@ async function runSecurityAuditTests() {
     uiPermsAdminOnUser.allowedRoles.includes('USER') &&
     uiPermsAdminOnUser.allowedRoles.includes('CHECKIN_OPERATOR'),
     'UI restringe seletor de ADMIN apenas a USER e CHECKIN_OPERATOR'
+  );
+
+  // TESTE 9: Autorização das RPCs Transacionais (ETAPA 1)
+  console.log('\n8️⃣ Testando Autorização das RPCs Transacionais (Migration 20261022000002)...');
+  const rpcMigrationPath = path.resolve(
+    __dirname,
+    '../supabase/migrations/20261022000002_rpc_authorization_hardening.sql'
+  );
+  assert(fs.existsSync(rpcMigrationPath), 'Migration corretiva 20261022000002_rpc_authorization_hardening.sql existe');
+  const rpcMigrationSql = fs.readFileSync(rpcMigrationPath, 'utf8');
+
+  const protectedRpcs = [
+    { name: 'process_order_checkout', sig: 'UUID, UUID, JSONB, payment_method, JSONB, UUID' },
+    { name: 'cancel_order_and_release_stock', sig: 'UUID, TEXT' },
+    { name: 'confirm_order_and_issue_tickets', sig: 'UUID, TEXT' },
+    { name: 'expire_pending_orders', sig: 'INT' },
+    { name: 'claim_order_confirmation_email', sig: 'UUID, TEXT, TEXT' },
+  ];
+
+  for (const fn of protectedRpcs) {
+    const fullSig = `public.${fn.name}(${fn.sig})`;
+    assert(
+      rpcMigrationSql.includes(`REVOKE EXECUTE ON FUNCTION ${fullSig} FROM PUBLIC;`) &&
+      rpcMigrationSql.includes(`REVOKE EXECUTE ON FUNCTION ${fullSig} FROM anon;`) &&
+      rpcMigrationSql.includes(`REVOKE EXECUTE ON FUNCTION ${fullSig} FROM authenticated;`) &&
+      rpcMigrationSql.includes(`GRANT EXECUTE ON FUNCTION ${fullSig} TO service_role;`),
+      `Migration corretiva revoga PUBLIC, anon e authenticated e concede apenas service_role em ${fullSig}`
+    );
+    assert(
+      combinedSql.includes(`REVOKE EXECUTE ON FUNCTION ${fullSig} FROM authenticated;`) &&
+      combinedSql.includes(`GRANT EXECUTE ON FUNCTION ${fullSig} TO service_role;`) &&
+      !combinedSql.includes(`GRANT EXECUTE ON FUNCTION public.${fn.name} TO authenticated`),
+      `combined_migration.sql sincronizado sem permissão para authenticated em ${fn.name}`
+    );
+  }
+
+  // Verificar que apenas process_order_checkout e cancel_order_and_release_stock são recriadas na migration corretiva
+  assert(
+    rpcMigrationSql.includes('CREATE OR REPLACE FUNCTION public.process_order_checkout') &&
+    rpcMigrationSql.includes('CREATE OR REPLACE FUNCTION public.cancel_order_and_release_stock') &&
+    !rpcMigrationSql.includes('CREATE OR REPLACE FUNCTION public.confirm_order_and_issue_tickets') &&
+    !rpcMigrationSql.includes('CREATE OR REPLACE FUNCTION public.expire_pending_orders') &&
+    !rpcMigrationSql.includes('CREATE OR REPLACE FUNCTION public.claim_order_confirmation_email'),
+    'Migration corretiva recria apenas as 2 funções com ajustes funcionais e aplica apenas REVOKE/GRANT nas 3 funções sem mudança funcional'
+  );
+
+  // Verificar checagem explícita de pré-requisitos via to_regprocedure (sem ignorar silenciosamente funções ausentes)
+  assert(
+    rpcMigrationSql.includes("to_regprocedure('public.process_order_checkout(uuid,uuid,jsonb,payment_method,jsonb,uuid)') IS NULL") &&
+    rpcMigrationSql.includes("to_regprocedure('public.cancel_order_and_release_stock(uuid,text)') IS NULL") &&
+    rpcMigrationSql.includes("to_regprocedure('public.confirm_order_and_issue_tickets(uuid,text)') IS NULL") &&
+    rpcMigrationSql.includes("to_regprocedure('public.expire_pending_orders(integer)') IS NULL") &&
+    rpcMigrationSql.includes("to_regprocedure('public.claim_order_confirmation_email(uuid,text,text)') IS NULL"),
+    'Migration corretiva valida explicitamente todas as 5 assinaturas via to_regprocedure antes de aplicar alterações'
+  );
+
+  // Verificar que process_order_checkout preserva p_buyer_info, normaliza CPF e valida compatibilidade de idempotência em ambos os arquivos
+  assert(
+    rpcMigrationSql.includes("p_buyer_info->>'name'") &&
+    rpcMigrationSql.includes("p_buyer_info->>'cpf'") &&
+    rpcMigrationSql.includes('length(v_buyer_cpf) IN (11, 14)') &&
+    rpcMigrationSql.includes('Conflito de idempotência: O identificador de pedido (%) já está vinculado a outro comprador, evento, método de pagamento ou conjunto de itens.') &&
+    combinedSql.includes('Conflito de idempotência: O identificador de pedido (%) já está vinculado a outro comprador, evento, método de pagamento ou conjunto de itens.'),
+    'process_order_checkout alinhado entre 20261022000002 e combined_migration.sql (p_buyer_info, CPF 11/14 dígitos, FOR UPDATE e mensagem de conflito)'
+  );
+
+  // Testar verifyOrderIdempotencyMatch (retries legítimos vs conflitos de idempotência)
+  const baseExistingOrder = {
+    id: 'ord-idem-100',
+    user_id: 'usr-100',
+    event_id: 'evt-100',
+    payment_method: 'pix',
+    items: [
+      { batch_id: 'batch-b', quantity: 2 },
+      { batch_id: 'batch-a', quantity: 1 },
+    ],
+  };
+
+  const retryLegit = verifyOrderIdempotencyMatch({
+    existingOrder: baseExistingOrder,
+    requestedUserId: 'usr-100',
+    requestedEventId: 'evt-100',
+    requestedPaymentMethod: 'pix',
+    // Mesmos itens em ordem diferente / fragmentados (1 + 1 = 2)
+    requestedItems: [
+      { batch_id: 'batch-a', quantity: 1 },
+      { batch_id: 'batch-b', quantity: 1 },
+      { batch_id: 'batch-b', quantity: 1 },
+    ],
+  });
+  const conflictItems = verifyOrderIdempotencyMatch({
+    existingOrder: baseExistingOrder,
+    requestedUserId: 'usr-100',
+    requestedEventId: 'evt-100',
+    requestedPaymentMethod: 'pix',
+    requestedItems: [{ batch_id: 'batch-a', quantity: 3 }],
+  });
+  const conflictUser = verifyOrderIdempotencyMatch({
+    existingOrder: baseExistingOrder,
+    requestedUserId: 'usr-outro-999',
+    requestedEventId: 'evt-100',
+    requestedPaymentMethod: 'pix',
+    requestedItems: [
+      { batch_id: 'batch-a', quantity: 1 },
+      { batch_id: 'batch-b', quantity: 2 },
+    ],
+  });
+  assert(
+    retryLegit.compatible === true &&
+    conflictItems.compatible === false &&
+    conflictItems.conflictReason === 'items_mismatch' &&
+    conflictUser.compatible === false &&
+    conflictUser.conflictReason === 'user_mismatch',
+    'verifyOrderIdempotencyMatch aprova retry legítimo consolidado e rejeita reutilização de order_id com itens ou comprador divergentes'
+  );
+
+  // TESTE 10: Endpoint de Check-in Autenticado e Autorizado (ETAPA 2)
+  console.log('\n9️⃣ Testando Autenticação e Autorização do Endpoint de Check-in (POST /api/tickets/validate)...');
+  const demoMap = new Map<string, any>();
+  let capturedOperatorId: string | null = null;
+  let rpcCalledCount = 0;
+
+  const createMockCheckinSupabase = (options: {
+    authValid: boolean;
+    userId?: string;
+    profileRole?: string | null;
+    rpcResult?: any;
+  }) => ({
+    auth: {
+      getUser: async (_token: string) => {
+        if (!options.authValid) {
+          return { data: { user: null }, error: { message: 'Invalid token' } };
+        }
+        return { data: { user: { id: options.userId || 'op-real-uuid-999' } }, error: null };
+      },
+    },
+    from: (_table: string) => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: options.profileRole ? { id: options.userId || 'op-real-uuid-999', role: options.profileRole } : null,
+            error: null,
+          }),
+        }),
+      }),
+    }),
+    rpc: async (_fn: string, params: any) => {
+      rpcCalledCount++;
+      capturedOperatorId = params.p_operator_id;
+      return {
+        data: options.rpcResult || {
+          success: true,
+          status: 'success',
+          code: params.p_code,
+          event: 'MEGA ENCONTRO PX CUSTON',
+          holder: 'João Piloto',
+          batch: 'Pista',
+          timestamp: '2026-10-22T20:00:00Z',
+        },
+        error: null,
+      };
+    },
+  });
+
+  // 10.1 Visitante sem token -> 401 e NÃO chama a RPC
+  const unauthRes = await executeAuthenticatedTicketValidation({
+    authHeader: undefined,
+    code: 'PX-12345678',
+    clientOperatorId: 'spoofed-id',
+    supabaseClient: createMockCheckinSupabase({ authValid: false }),
+    isProduction: true,
+    demoUsedMap: demoMap,
+  });
+  assert(
+    unauthRes.statusCode === 401 && unauthRes.payload.valid === false && rpcCalledCount === 0,
+    'Visitante não autenticado recebe HTTP 401 e não consome ingresso'
+  );
+
+  // 10.2 Usuário comum autenticado (USER) -> 403 e NÃO chama a RPC
+  const regularUserRes = await executeAuthenticatedTicketValidation({
+    authHeader: 'Bearer valid_user_jwt',
+    code: 'PX-12345678',
+    clientOperatorId: 'spoofed-id',
+    supabaseClient: createMockCheckinSupabase({ authValid: true, userId: 'usr-comum-1', profileRole: 'USER' }),
+    isProduction: true,
+    demoUsedMap: demoMap,
+  });
+  assert(
+    regularUserRes.statusCode === 403 && regularUserRes.payload.valid === false && rpcCalledCount === 0,
+    'Usuário comum autenticado (USER) recebe HTTP 403 e não consome ingresso'
+  );
+
+  // 10.3 Operador autorizado (CHECKIN_OPERATOR) -> 200 e ignora operator_id enviado pelo cliente
+  const operatorRes = await executeAuthenticatedTicketValidation({
+    authHeader: 'Bearer valid_operator_jwt',
+    code: 'PX:PX-12345678:evt-1',
+    clientOperatorId: 'hacker-spoofed-operator-id',
+    deviceId: 'scanner-portaria-1',
+    supabaseClient: createMockCheckinSupabase({
+      authValid: true,
+      userId: 'verified-operator-uuid-777',
+      profileRole: 'CHECKIN_OPERATOR',
+    }),
+    isProduction: true,
+    demoUsedMap: demoMap,
+  });
+  assert(
+    operatorRes.statusCode === 200 &&
+    operatorRes.payload.valid === true &&
+    rpcCalledCount === 1 &&
+    capturedOperatorId === 'verified-operator-uuid-777',
+    'Operador autorizado (CHECKIN_OPERATOR) valida ingresso com HTTP 200 e servidor ignora operator_id do cliente'
+  );
+
+  // TESTE 11: Cancelamento de Pedido e Proteção de Estoque (ETAPA 3)
+  console.log('\n🔟 Testando Cancelamento Transacional e Proteção contra Liberação Falsa de Estoque...');
+  assert(
+    !serverCode.includes(".update({ payment_status: 'cancelled'"),
+    'server.ts não possui mais fallback direto que marca orders.payment_status = cancelled quando a RPC falha'
+  );
+
+  // 11.1 Falha na RPC de cancelamento -> 503, status permanece pending, stock_released = false
+  const cancelRpcFail = evaluateOrderCancellationOutcome({
+    rpcResult: null,
+    rpcError: { message: 'Database connection timeout' },
+    orderId: 'ord-pending-1',
+    currentStatus: 'pending',
+    total: 99.0,
+  });
+  assert(
+    cancelRpcFail.statusCode === 503 &&
+    cancelRpcFail.cancelled === false &&
+    cancelRpcFail.stockReleased === false &&
+    cancelRpcFail.payload.status === 'pending' &&
+    cancelRpcFail.payload.expired === false,
+    'Falha na RPC de cancelamento não altera pedido para cancelled nem informa liberação de estoque (HTTP 503)'
+  );
+
+  // 11.2 Pedido já aprovado concorrentemente -> 200, status = approved, cancelled = false, stock_released = false
+  const cancelAlreadyApproved = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: false,
+      status: 'approved',
+      error: 'Operação bloqueada: Pedidos com pagamento aprovado não podem ter o estoque liberado.',
+    },
+    rpcError: null,
+    orderId: 'ord-approved-1',
+    currentStatus: 'pending',
+    total: 99.0,
+  });
+  assert(
+    cancelAlreadyApproved.statusCode === 200 &&
+    cancelAlreadyApproved.outcome === 'already_approved' &&
+    cancelAlreadyApproved.cancelled === false &&
+    cancelAlreadyApproved.stockReleased === false &&
+    cancelAlreadyApproved.payload.status === 'approved' &&
+    cancelAlreadyApproved.payload.expired === false,
+    'Pedido aprovado concorrentemente é protegido e jamais cancelado (status=approved, stock_released=false)'
+  );
+
+  // 11.3 Recusa da operação pela RPC -> 409, cancelled = false, stock_released = false
+  const cancelRefused = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: false,
+      status: 'in_process',
+      error: 'Operação bloqueada: Pedido em análise antifraude.',
+    },
+    rpcError: null,
+    orderId: 'ord-inprocess-1',
+    currentStatus: 'in_process',
+    total: 99.0,
+  });
+  assert(
+    cancelRefused.statusCode === 409 &&
+    cancelRefused.outcome === 'operation_refused' &&
+    cancelRefused.cancelled === false &&
+    cancelRefused.stockReleased === false,
+    'Recusa da operação pela RPC retorna HTTP 409 sem cancelar pedido e sem declarar liberação de estoque'
+  );
+
+  // 11.4 Sucesso confirmado pela RPC -> 200, status = cancelled, stock_released = true
+  const cancelConfirmed = evaluateOrderCancellationOutcome({
+    rpcResult: {
+      success: true,
+      order_id: 'ord-expired-1',
+      status: 'cancelled',
+      released_items_count: 2,
+      reason: 'expired_timeout',
+    },
+    rpcError: null,
+    orderId: 'ord-expired-1',
+    currentStatus: 'pending',
+    total: 99.0,
+  });
+  assert(
+    cancelConfirmed.statusCode === 200 &&
+    cancelConfirmed.outcome === 'cancelled' &&
+    cancelConfirmed.cancelled === true &&
+    cancelConfirmed.stockReleased === true &&
+    cancelConfirmed.payload.status === 'cancelled' &&
+    cancelConfirmed.payload.stock_released === true,
+    'Cancelamento confirmado pela RPC informa status=cancelled e stock_released=true apenas com comprovação da RPC'
   );
 
   console.log(`\n========================================`);

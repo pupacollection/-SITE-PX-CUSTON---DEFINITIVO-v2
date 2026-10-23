@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Ticket, ActiveScreen } from '../types';
+import { supabase } from '../lib/supabase';
 import {
   Camera,
   CheckCircle2,
@@ -78,10 +79,16 @@ export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate, o
     if (!cleanCode) return;
 
     try {
-      // Chamada oficial à API autoritativa do servidor
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      // Chamada oficial à API autoritativa do servidor (com token de operador autenticado)
       const res = await fetch('/api/tickets/validate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ code: cleanCode, device_id: 'web-camera-scanner' }),
       });
 
@@ -112,6 +119,11 @@ export const CheckinView: React.FC<CheckinViewProps> = ({ tickets, onNavigate, o
             qr_payload: cleanCode,
             created_at: new Date().toISOString(),
           },
+        });
+      } else if (res.status === 401 || res.status === 403) {
+        setLastValidation({
+          status: 'invalid',
+          message: data.message || data.error || 'Acesso negado: Operador sem permissão para validar ingressos.',
         });
       } else if (res.status === 409 || data.status === 'already_used') {
         setLastValidation({

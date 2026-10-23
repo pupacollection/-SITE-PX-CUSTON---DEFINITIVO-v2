@@ -8,7 +8,12 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import { validateAndDecodePng } from './src/lib/pngValidator';
-import { evaluateTicketValidationOutcome } from './src/lib/ticketValidator';
+import {
+  evaluateTicketValidationOutcome,
+  executeAuthenticatedTicketValidation,
+  evaluateOrderCancellationOutcome,
+  verifyOrderIdempotencyMatch,
+} from './src/lib/ticketValidator';
 import {
   evaluateUserRoleChangePolicy,
   isValidUserRole,
@@ -483,51 +488,26 @@ app.get('/api/events', async (req: Request, res: Response) => {
   });
 });
 
-// Check-in Ticket validation endpoint (Server-Authoritative Anti-Fraud & Concurrency Safe)
+// Check-in Ticket validation endpoint (Server-Authoritative Anti-Fraud, RBAC & Concurrency Safe)
 app.post('/api/tickets/validate', async (req: Request, res: Response) => {
-  const { code, operator_id, device_id } = req.body;
-  if (!code) {
-    return res.status(400).json({ valid: false, message: 'Código do ingresso não fornecido.' });
-  }
-  let cleanCode = String(code).trim().toUpperCase();
-  // Se o scanner enviar o payload QR completo (ex: "PX:PX-7AI89C10:0000-0000-..."), extrair o código do ingresso
-  if (cleanCode.startsWith('PX:') && cleanCode.split(':').length >= 2) {
-    const parts = cleanCode.split(':');
-    cleanCode = parts[1].trim();
-  }
+  const { code, operator_id, device_id } = req.body || {};
 
-  // SEGURANÇA: Parâmetros arbitrários de reset no corpo desta rota pública são estritamente desconsiderados.
-  // Validação e proteção anti-dupla-entrada prosseguem sem bypass.
+  // SEGURANÇA:
+  // 1. Exigir autenticação válida no Supabase Auth e autorização explícita para
+  //    CHECKIN_OPERATOR, ADMIN ou SUPER_ADMIN antes de consumir qualquer ingresso.
+  // 2. NUNCA confiar em operator_id enviado pelo cliente (derivado da sessão verificada no servidor).
+  // 3. Parâmetros arbitrários de reset no corpo desta rota são estritamente desconsiderados.
+  const validationResult = await executeAuthenticatedTicketValidation({
+    authHeader: req.headers.authorization,
+    code,
+    clientOperatorId: operator_id,
+    deviceId: device_id,
+    supabaseClient: supabaseAdmin,
+    isProduction: isProductionEnvironment(),
+    demoUsedMap: demoUsedTickets,
+  });
 
-  try {
-    // 1. Validação atômica oficial via Stored Procedure com bloqueio FOR UPDATE (Anti-Concorrência & Transacional)
-    const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('validate_and_checkin_ticket', {
-      p_code: cleanCode,
-      p_operator_id: operator_id || null,
-      p_device_id: device_id || 'web-scanner',
-    });
-
-    // 2. Validação estrita do payload (arrays, tipos primitivos, campos obrigatórios e mapeamento de status)
-    const outcome = evaluateTicketValidationOutcome({
-      rpcResult,
-      rpcError,
-      cleanCode,
-      isProduction: isProductionEnvironment(),
-      demoUsedMap: demoUsedTickets,
-      operatorId: operator_id,
-      deviceId: device_id,
-    });
-
-    return res.status(outcome.statusCode).json(outcome.payload);
-  } catch (err: any) {
-    console.warn('[Check-in API] Exceção operacional no banco de dados:', err?.message || err);
-    return res.status(503).json({
-      valid: false,
-      code: cleanCode,
-      status: 'service_unavailable',
-      message: 'Serviço de validação temporariamente indisponível devido a falha operacional no banco de dados. Tente novamente.',
-    });
-  }
+  return res.status(validationResult.statusCode).json(validationResult.payload);
 });
 
 
@@ -1392,8 +1372,13 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
         });
       }
 
-      // Conflito de concorrência ou estoque insuficiente
-      if (msg.includes('insuficiente') || msg.includes('Estoque insuficiente')) {
+      // Conflito de idempotência (reutilização de order_id com comprador, evento, método ou itens diferentes)
+      // ou conflito de concorrência / estoque insuficiente
+      if (
+        msg.includes('Conflito de idempotência') ||
+        msg.includes('insuficiente') ||
+        msg.includes('Estoque insuficiente')
+      ) {
         return res.status(409).json({ error: msg });
       }
 
@@ -1417,6 +1402,29 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
         .maybeSingle();
 
       if (checkedOrder && checkedOrder.id) {
+        const idempotencyCheck = verifyOrderIdempotencyMatch({
+          existingOrder: {
+            id: checkedOrder.id,
+            user_id: checkedOrder.user_id,
+            event_id: checkedOrder.event_id,
+            payment_method: checkedOrder.payment_method,
+            items: (checkedOrder.order_items || []).map((oi: any) => ({
+              batch_id: oi.batch_id,
+              quantity: Number(oi.quantity),
+            })),
+          },
+          requestedUserId: buyerUserId,
+          requestedEventId: event_id,
+          requestedPaymentMethod: payment_method || 'pix',
+          requestedItems: formattedItems,
+        });
+
+        if (!idempotencyCheck.compatible) {
+          return res.status(409).json({
+            error: idempotencyCheck.errorMessage || 'Conflito de idempotência ao verificar pedido existente.',
+          });
+        }
+
         console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} recuperado com sucesso após oscilação.`);
         const mpAccessToken = process.env.MP_ACCESS_TOKEN;
         const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
@@ -1526,11 +1534,34 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
     try {
       const { data: maybeOrder } = await supabaseAdmin
         .from('orders')
-        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, created_at')
+        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, created_at, order_items(batch_id, quantity, unit_price, subtotal)')
         .eq('id', clientOrderId)
         .maybeSingle();
 
       if (maybeOrder && maybeOrder.id) {
+        const idempotencyCheck = verifyOrderIdempotencyMatch({
+          existingOrder: {
+            id: maybeOrder.id,
+            user_id: maybeOrder.user_id,
+            event_id: maybeOrder.event_id,
+            payment_method: maybeOrder.payment_method,
+            items: ((maybeOrder as any).order_items || []).map((oi: any) => ({
+              batch_id: oi.batch_id,
+              quantity: Number(oi.quantity),
+            })),
+          },
+          requestedUserId: buyerUserId,
+          requestedEventId: event_id,
+          requestedPaymentMethod: payment_method || 'pix',
+          requestedItems: formattedItems,
+        });
+
+        if (!idempotencyCheck.compatible) {
+          return res.status(409).json({
+            error: idempotencyCheck.errorMessage || 'Conflito de idempotência ao verificar pedido existente.',
+          });
+        }
+
         console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} confirmado no banco após reconexão.`);
         const mpAccessToken = process.env.MP_ACCESS_TOKEN;
         const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
@@ -1577,31 +1608,39 @@ app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
       if (dbOrder.payment_status === 'pending') {
         const ageMs = Date.now() - new Date(dbOrder.created_at).getTime();
         if (ageMs > 15 * 60 * 1000) {
-          // Cancelar e liberar estoque atomicamente
+          // Cancelar e liberar estoque exclusivamente via RPC transacional (SEM fallback direto na tabela orders)
+          let cancelResult: any = null;
+          let cancelErr: any = null;
           try {
-            await supabaseAdmin.rpc('cancel_order_and_release_stock', {
+            const rpcRes = await supabaseAdmin.rpc('cancel_order_and_release_stock', {
               p_order_id: id,
               p_reason: 'expired_timeout',
             });
-          } catch {
-            await supabaseAdmin
-              .from('orders')
-              .update({ payment_status: 'cancelled', updated_at: new Date().toISOString() })
-              .eq('id', id);
+            cancelResult = rpcRes.data;
+            cancelErr = rpcRes.error;
+          } catch (rpcException: any) {
+            cancelErr = { message: rpcException?.message || 'Exceção ao executar RPC de cancelamento' };
           }
 
-          dbOrder.payment_status = 'cancelled';
-          const cached = ordersStore.get(id);
-          if (cached) cached.payment_status = 'cancelled';
-
-          return res.json({
-            id: dbOrder.id,
-            status: 'cancelled',
+          const evaluation = evaluateOrderCancellationOutcome({
+            rpcResult: cancelResult,
+            rpcError: cancelErr,
+            orderId: dbOrder.id,
+            currentStatus: dbOrder.payment_status,
             total: dbOrder.total,
-            updated_at: new Date().toISOString(),
-            expired: true,
-            message: 'O tempo limite para pagamento deste pedido expirou (15 minutos). O estoque reservado foi liberado automaticamente.',
+            updatedAt: dbOrder.updated_at,
           });
+
+          const cached = ordersStore.get(id);
+          if (evaluation.cancelled) {
+            dbOrder.payment_status = 'cancelled';
+            if (cached) cached.payment_status = 'cancelled';
+          } else if (evaluation.outcome === 'already_approved') {
+            dbOrder.payment_status = 'approved';
+            if (cached) cached.payment_status = 'approved';
+          }
+
+          return res.status(evaluation.statusCode).json(evaluation.payload);
         }
       }
 
@@ -1621,15 +1660,36 @@ app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
     if (order.payment_status === 'pending') {
       const ageMs = Date.now() - new Date(order.created_at).getTime();
       if (ageMs > 15 * 60 * 1000) {
-        order.payment_status = 'cancelled';
-        return res.json({
-          id: order.id,
-          status: 'cancelled',
+        // Mesmo para pedido em cache, exigir confirmação da RPC transacional antes de declarar cancelamento ou liberação de estoque
+        let cancelResult: any = null;
+        let cancelErr: any = null;
+        try {
+          const rpcRes = await supabaseAdmin.rpc('cancel_order_and_release_stock', {
+            p_order_id: id,
+            p_reason: 'expired_timeout',
+          });
+          cancelResult = rpcRes.data;
+          cancelErr = rpcRes.error;
+        } catch (rpcException: any) {
+          cancelErr = { message: rpcException?.message || 'Exceção ao executar RPC de cancelamento' };
+        }
+
+        const evaluation = evaluateOrderCancellationOutcome({
+          rpcResult: cancelResult,
+          rpcError: cancelErr,
+          orderId: order.id,
+          currentStatus: order.payment_status,
           total: order.total,
-          updated_at: new Date().toISOString(),
-          expired: true,
-          message: 'O tempo limite para pagamento deste pedido expirou (15 minutos). O estoque reservado foi liberado.',
+          updatedAt: order.created_at,
         });
+
+        if (evaluation.cancelled) {
+          order.payment_status = 'cancelled';
+        } else if (evaluation.outcome === 'already_approved') {
+          order.payment_status = 'approved';
+        }
+
+        return res.status(evaluation.statusCode).json(evaluation.payload);
       }
     }
 
@@ -1876,16 +1936,63 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
       }
     );
 
-    if (cancelErr) {
-      console.error('[PX CUSTON Webhook] Falha ao cancelar pedido via RPC:', cancelErr.message);
-      return res.status(500).json({ error: 'Falha ao processar cancelamento no banco.' });
+    const evaluation = evaluateOrderCancellationOutcome({
+      rpcResult: cancelResult,
+      rpcError: cancelErr,
+      orderId: officialOrderId,
+      currentStatus: dbOrder.payment_status,
+      total: Number(dbOrder.total),
+    });
+
+    if (evaluation.outcome === 'rpc_error') {
+      console.error('[PX CUSTON Webhook] Falha ao cancelar pedido via RPC:', cancelErr?.message || evaluation.payload.error);
+      return res.status(500).json({
+        error: 'Falha ao processar cancelamento no banco.',
+        stock_released: false,
+      });
+    }
+
+    if (evaluation.outcome === 'already_approved') {
+      const cached = ordersStore.get(officialOrderId);
+      if (cached) cached.payment_status = 'approved';
+      console.warn(`[PX CUSTON Webhook] Cancelamento recusado pela RPC: Pedido ${officialOrderId} já havia sido aprovado concorrentemente.`);
+      return res.status(200).json({
+        received: true,
+        ignored: true,
+        already_approved: true,
+        order_id: officialOrderId,
+        status: 'approved',
+        stock_released: false,
+        message: evaluation.payload.message,
+      });
+    }
+
+    if (evaluation.outcome === 'operation_refused') {
+      console.warn(`[PX CUSTON Webhook] Cancelamento recusado pela RPC para pedido ${officialOrderId}: ${evaluation.payload.error}`);
+      return res.status(409).json({
+        received: true,
+        cancelled: false,
+        order_id: officialOrderId,
+        status: evaluation.payload.status,
+        stock_released: false,
+        error: evaluation.payload.error,
+      });
     }
 
     const cached = ordersStore.get(officialOrderId);
     if (cached) cached.payment_status = 'cancelled';
 
-    console.log(`[PX CUSTON Webhook] Pedido ${officialOrderId} cancelado. Estoque devolvido ao lote.`);
-    return res.status(200).json({ received: true, order_id: officialOrderId, status: 'cancelled' });
+    console.log(
+      `[PX CUSTON Webhook] Pedido ${officialOrderId} cancelado (stock_released=${evaluation.stockReleased}, itens=${evaluation.releasedItemsCount}).`
+    );
+    return res.status(200).json({
+      received: true,
+      order_id: officialOrderId,
+      status: 'cancelled',
+      already_cancelled: evaluation.outcome === 'already_cancelled',
+      stock_released: evaluation.stockReleased,
+      released_items_count: evaluation.releasedItemsCount,
+    });
   }
 
   if (officialStatus === 'in_process') {

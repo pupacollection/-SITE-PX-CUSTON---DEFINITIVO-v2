@@ -1046,34 +1046,126 @@ DECLARE
   v_qty INT;
   v_batch_id UUID;
   v_profile RECORD;
+  v_requested_items_norm JSONB;
+  v_existing_items_norm JSONB;
+  v_existing_items_full JSONB;
+  v_existing_event_title TEXT;
+  v_buyer_name TEXT := NULLIF(btrim(COALESCE(p_buyer_info->>'name', p_buyer_info->>'full_name', '')), '');
+  v_buyer_cpf TEXT := NULLIF(regexp_replace(COALESCE(p_buyer_info->>'cpf', ''), '\D', '', 'g'), '');
 BEGIN
-  -- 0. Idempotência Estrita: Se o ID informado já foi processado (retry de rede ou cliente), retornar sem duplicar
+  -- 0. Validar payload de itens antes de qualquer consulta ou comparação de idempotência
+  IF p_items IS NULL OR jsonb_typeof(p_items) IS DISTINCT FROM 'array' OR jsonb_array_length(p_items) = 0 THEN
+    RAISE EXCEPTION 'O pedido deve conter pelo menos um item.';
+  END IF;
+
+  -- Normalizar itens solicitados (consolidados por batch_id e ordenados ascendentemente)
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object('batch_id', norm.batch_id, 'quantity', norm.quantity)
+      ORDER BY norm.batch_id ASC
+    ),
+    '[]'::jsonb
+  )
+  INTO v_requested_items_norm
+  FROM (
+    SELECT batch_id, SUM(quantity)::INT AS quantity
+    FROM jsonb_to_recordset(p_items) AS (batch_id UUID, quantity INT)
+    GROUP BY batch_id
+  ) norm;
+
+  -- 1. Idempotência Estrita com Verificação de Compatibilidade:
+  -- Se o ID informado já existir, validar se pertence ao mesmo comprador, mesmo evento,
+  -- mesmo método de pagamento e exatamente os mesmos lotes/quantidades.
   IF p_order_id IS NOT NULL THEN
-    SELECT * INTO v_existing_order FROM public.orders WHERE id = p_order_id;
+    SELECT * INTO v_existing_order
+    FROM public.orders
+    WHERE id = p_order_id
+    FOR UPDATE;
     IF v_existing_order.id IS NOT NULL THEN
+      SELECT COALESCE(
+        jsonb_agg(
+          jsonb_build_object('batch_id', existing_norm.batch_id, 'quantity', existing_norm.quantity)
+          ORDER BY existing_norm.batch_id ASC
+        ),
+        '[]'::jsonb
+      )
+      INTO v_existing_items_norm
+      FROM (
+        SELECT oi.batch_id, SUM(oi.quantity)::INT AS quantity
+        FROM public.order_items oi
+        WHERE oi.order_id = v_existing_order.id
+        GROUP BY oi.batch_id
+      ) existing_norm;
+
+      IF v_existing_order.user_id IS DISTINCT FROM p_user_id
+         OR v_existing_order.event_id IS DISTINCT FROM p_event_id
+         OR v_existing_order.payment_method IS DISTINCT FROM p_payment_method
+         OR v_existing_items_norm IS DISTINCT FROM v_requested_items_norm
+      THEN
+        RAISE EXCEPTION 'Conflito de idempotência: O identificador de pedido (%) já está vinculado a outro comprador, evento, método de pagamento ou conjunto de itens.', p_order_id;
+      END IF;
+
+      -- Reconstruir payload completo de itens e título do evento para preservar retries legítimos
+      SELECT COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'batch_id', oi.batch_id,
+            'batch_name', COALESCE(tb.name, 'Ingresso PX'),
+            'quantity', oi.quantity,
+            'unit_price', oi.unit_price,
+            'subtotal', oi.subtotal
+          )
+          ORDER BY oi.batch_id ASC
+        ),
+        '[]'::jsonb
+      )
+      INTO v_existing_items_full
+      FROM public.order_items oi
+      LEFT JOIN public.ticket_batches tb ON tb.id = oi.batch_id
+      WHERE oi.order_id = v_existing_order.id;
+
+      SELECT e.title INTO v_existing_event_title FROM public.events e WHERE e.id = v_existing_order.event_id;
+
       RETURN jsonb_build_object(
         'success', true,
         'already_processed', true,
         'order_id', v_existing_order.id,
         'event_id', v_existing_order.event_id,
+        'event_title', COALESCE(v_existing_event_title, 'PX CUSTON'),
+        'items', v_existing_items_full,
         'subtotal', v_existing_order.subtotal,
         'convenience_fee', v_existing_order.convenience_fee,
         'discount', v_existing_order.discount,
         'total', v_existing_order.total,
         'payment_method', v_existing_order.payment_method,
         'payment_status', v_existing_order.payment_status,
+        'buyer_info', COALESCE(p_buyer_info, '{}'::jsonb),
         'created_at', v_existing_order.created_at
       );
     END IF;
   END IF;
 
-  -- 1. Validar se o perfil do comprador existe
-  SELECT id INTO v_profile FROM public.profiles WHERE id = p_user_id;
+  -- 2. Validar se o perfil do comprador existe e complementar dados ausentes com p_buyer_info
+  SELECT id, full_name, cpf INTO v_profile FROM public.profiles WHERE id = p_user_id;
   IF v_profile.id IS NULL THEN
     RAISE EXCEPTION 'Perfil do comprador não encontrado na base oficial PX CUSTON (id: %).', p_user_id;
   END IF;
 
-  -- 2. Validar se o evento existe e NÃO é demo para pedidos comerciais
+  IF (v_profile.full_name IS NULL OR btrim(v_profile.full_name) = '' OR v_profile.full_name = 'Cliente PX') AND v_buyer_name IS NOT NULL THEN
+    UPDATE public.profiles
+    SET full_name = v_buyer_name,
+        updated_at = v_now
+    WHERE id = p_user_id;
+  END IF;
+
+  IF (v_profile.cpf IS NULL OR btrim(v_profile.cpf) = '') AND v_buyer_cpf IS NOT NULL AND length(v_buyer_cpf) IN (11, 14) THEN
+    UPDATE public.profiles
+    SET cpf = v_buyer_cpf,
+        updated_at = v_now
+    WHERE id = p_user_id;
+  END IF;
+
+  -- 3. Validar se o evento existe e NÃO é demo para pedidos comerciais
   SELECT id, title, is_demo, status INTO v_event FROM public.events WHERE id = p_event_id;
   IF v_event.id IS NULL THEN
     RAISE EXCEPTION 'Evento não encontrado (id: %).', p_event_id;
@@ -1085,11 +1177,6 @@ BEGIN
 
   IF v_event.status IS DISTINCT FROM 'published' THEN
     RAISE EXCEPTION 'Operação bloqueada: O evento selecionado não está publicado para vendas.';
-  END IF;
-
-  -- 3. Validar payload de itens
-  IF p_items IS NULL OR jsonb_array_length(p_items) = 0 THEN
-    RAISE EXCEPTION 'O pedido deve conter pelo menos um item.';
   END IF;
 
   -- 4. Processar cada item com ROW LOCKING (FOR UPDATE) no lote correspondente
@@ -1231,6 +1318,7 @@ BEGIN
     'total', v_total,
     'payment_method', p_payment_method,
     'payment_status', 'pending',
+    'buyer_info', COALESCE(p_buyer_info, '{}'::jsonb),
     'created_at', v_now
   );
 END;
@@ -1262,11 +1350,20 @@ BEGIN
     RETURN jsonb_build_object('success', false, 'error', 'Pedido não encontrado.');
   END IF;
 
-  -- 2. REGRA FUNDAMENTAL: Se o pedido já estiver 'approved', 'refunded' ou 'cancelled', NÃO liberar estoque!
+  -- 2. REGRA FUNDAMENTAL: Se o pedido já estiver 'approved', NÃO liberar estoque!
   IF v_order.payment_status = 'approved' THEN
     RETURN jsonb_build_object(
       'success', false, 
       'error', 'Operação bloqueada: Pedidos com pagamento aprovado não podem ter o estoque liberado por cancelamento ou expiração.',
+      'status', v_order.payment_status
+    );
+  END IF;
+
+  -- 2.1. Se o pedido estiver 'refunded' ou 'in_process', bloquear cancelamento automático
+  IF v_order.payment_status IN ('refunded', 'in_process') THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', format('Operação bloqueada: Pedidos com status "%s" não podem ser cancelados por esta rotina.', v_order.payment_status),
       'status', v_order.payment_status
     );
   END IF;
@@ -1277,6 +1374,8 @@ BEGIN
       'success', true, 
       'already_cancelled', true,
       'order_id', p_order_id,
+      'status', 'cancelled',
+      'released_items_count', 0,
       'message', 'Pedido já havia sido cancelado anteriormente. Estoque preservado sem duplicação.'
     );
   END IF;
@@ -1472,22 +1571,26 @@ BEGIN
 END;
 $$;
 
--- Permissões de Segurança Rigorosas
-REVOKE EXECUTE ON FUNCTION public.process_order_checkout FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.process_order_checkout FROM anon;
-GRANT EXECUTE ON FUNCTION public.process_order_checkout TO authenticated, service_role;
+-- Permissões de Segurança Rigorosas (Restritas exclusivamente ao backend / service_role)
+REVOKE EXECUTE ON FUNCTION public.process_order_checkout(UUID, UUID, JSONB, payment_method, JSONB, UUID) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.process_order_checkout(UUID, UUID, JSONB, payment_method, JSONB, UUID) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.process_order_checkout(UUID, UUID, JSONB, payment_method, JSONB, UUID) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.process_order_checkout(UUID, UUID, JSONB, payment_method, JSONB, UUID) TO service_role;
 
-REVOKE EXECUTE ON FUNCTION public.cancel_order_and_release_stock FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.cancel_order_and_release_stock FROM anon;
-GRANT EXECUTE ON FUNCTION public.cancel_order_and_release_stock TO authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.cancel_order_and_release_stock(UUID, TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.cancel_order_and_release_stock(UUID, TEXT) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.cancel_order_and_release_stock(UUID, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.cancel_order_and_release_stock(UUID, TEXT) TO service_role;
 
-REVOKE EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets FROM anon;
-GRANT EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets TO authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets(UUID, TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets(UUID, TEXT) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets(UUID, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.confirm_order_and_issue_tickets(UUID, TEXT) TO service_role;
 
-REVOKE EXECUTE ON FUNCTION public.expire_pending_orders FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.expire_pending_orders FROM anon;
-GRANT EXECUTE ON FUNCTION public.expire_pending_orders TO authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.expire_pending_orders(INT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.expire_pending_orders(INT) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.expire_pending_orders(INT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.expire_pending_orders(INT) TO service_role;
 
 -- ------------------------------------------------------------------------------
 -- 12. CONTROLE PERSISTENTE E IDEMPOTENTE DE NOTIFICAÇÕES DE PEDIDOS POR E-MAIL
