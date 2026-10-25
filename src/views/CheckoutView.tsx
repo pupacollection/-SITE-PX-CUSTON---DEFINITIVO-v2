@@ -1,6 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { EventItem, TicketBatch, PaymentMethod, Ticket, UserProfile, ActiveScreen } from '../types';
+import {
+  EventItem,
+  TicketBatch,
+  PaymentMethod,
+  Ticket,
+  UserProfile,
+  ActiveScreen,
+  MercadoPagoConfig,
+} from '../types';
 import { ordersService } from '../services/ordersService';
+import {
+  fetchPaymentSettings,
+  mapServerResponseToMercadoPagoConfig,
+} from '../services/paymentSettingsService';
 import {
   CreditCard,
   QrCode,
@@ -14,13 +26,60 @@ import {
   AlertCircle,
   Clock,
   RefreshCw,
+  Loader2,
 } from 'lucide-react';
+
+function generateClientUuidV4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function isValidBrazilianCpfClient(rawCpf: string | null | undefined): boolean {
+  const digits = String(rawCpf || '').replace(/\D/g, '');
+  if (digits.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(digits)) return false;
+  if (digits === '12345678900' || digits === '12345678909') return false;
+
+  let sum1 = 0;
+  for (let i = 0; i < 9; i++) {
+    sum1 += Number(digits[i]) * (10 - i);
+  }
+  let check1 = (sum1 * 10) % 11;
+  if (check1 === 10) check1 = 0;
+  if (check1 !== Number(digits[9])) return false;
+
+  let sum2 = 0;
+  for (let i = 0; i < 10; i++) {
+    sum2 += Number(digits[i]) * (11 - i);
+  }
+  let check2 = (sum2 * 10) % 11;
+  if (check2 === 10) check2 = 0;
+  if (check2 !== Number(digits[10])) return false;
+
+  return true;
+}
+
+function formatCpfMask(value: string): string {
+  const digits = value.replace(/\D/g, '').slice(0, 11);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}.${digits.slice(3)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6)}`;
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9, 11)}`;
+}
 
 interface CheckoutViewProps {
   event: EventItem;
   selectedBatches: { batch: TicketBatch; quantity: number }[];
   user: UserProfile | null;
+  paymentConfig?: MercadoPagoConfig;
   onSuccess: (newTickets: Ticket[]) => void;
+  onPaymentApproved?: (orderId: string) => void;
   onCancel: () => void;
   onNavigate: (screen: ActiveScreen) => void;
 }
@@ -29,21 +88,109 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
   event,
   selectedBatches,
   user,
-  onSuccess,
+  paymentConfig,
+  onSuccess: _onSuccess,
+  onPaymentApproved,
   onCancel,
   onNavigate,
 }) => {
-  const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('pix');
+  const [verifiedPaymentConfig, setVerifiedPaymentConfig] = useState<MercadoPagoConfig | null>(null);
+  const [isLoadingPaymentConfig, setIsLoadingPaymentConfig] = useState<boolean>(true);
+  const [paymentConfigError, setPaymentConfigError] = useState<string | null>(null);
+
+  const isPaymentConfigVerified =
+    !isLoadingPaymentConfig && !paymentConfigError && verifiedPaymentConfig !== null;
+
+  // Fail-closed: nunca apresentar Pix, Cartão ou Boleto como disponíveis se a configuração do servidor não pôde ser carregada.
+  // Cartão de Crédito e Boleto permanecem bloqueados até que seus fluxos reais de tokenização/emissão sejam homologados.
+  const pixEnabled = isPaymentConfigVerified ? Boolean(verifiedPaymentConfig.pix_enabled) : false;
+  const creditCardEnabled = false;
+  const boletoEnabled = false;
+
+  const getFirstEnabledMethod = (): PaymentMethod => {
+    return 'pix';
+  };
+
+  const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>(getFirstEnabledMethod);
   const [processing, setProcessing] = useState(false);
-  const [buyerName, setBuyerName] = useState(user?.full_name || 'Deivid J. Silva');
-  const [buyerEmail, setBuyerEmail] = useState(user?.email || 'deivid@gmail.com');
-  const [buyerCpf, setBuyerCpf] = useState('123.456.789-00');
+  const [buyerName, setBuyerName] = useState(user?.full_name || '');
+  const [buyerEmail, setBuyerEmail] = useState(user?.email || '');
+  const [buyerCpf, setBuyerCpf] = useState((user as any)?.cpf ? formatCpfMask((user as any).cpf) : '');
+  const [checkoutAttemptId, setCheckoutAttemptId] = useState<string>(() => generateClientUuidV4());
   const [registeredOrder, setRegisteredOrder] = useState<any | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [copiedPix, setCopiedPix] = useState(false);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(900);
   const [isOrderExpired, setIsOrderExpired] = useState(false);
   const [orderPaymentStatus, setOrderPaymentStatus] = useState<'pending' | 'approved' | 'cancelled'>('pending');
+
+  // Sincroniza dados reais do comprador autenticado caso o perfil carregue após a montagem
+  useEffect(() => {
+    if (user?.full_name && !buyerName) {
+      setBuyerName(user.full_name);
+    }
+    if (user?.email && !buyerEmail) {
+      setBuyerEmail(user.email);
+    }
+    if ((user as any)?.cpf && !buyerCpf) {
+      setBuyerCpf(formatCpfMask((user as any).cpf));
+    }
+  }, [user]);
+
+  // Regenera o identificador de tentativa apenas quando o escopo da compra (evento, lotes ou método) muda antes do registro
+  const batchesSignature = selectedBatches
+    .map((item) => `${item.batch.id}:${item.quantity}`)
+    .sort()
+    .join('|');
+
+  useEffect(() => {
+    if (!registeredOrder) {
+      setCheckoutAttemptId(generateClientUuidV4());
+    }
+  }, [event.id, selectedMethod, batchesSignature]);
+
+  const loadAuthoritativePaymentConfig = async (signal?: AbortSignal) => {
+    setIsLoadingPaymentConfig(true);
+    setPaymentConfigError(null);
+    try {
+      const serverData = await fetchPaymentSettings(signal);
+      if (signal?.aborted) return;
+      const mapped = mapServerResponseToMercadoPagoConfig(serverData, paymentConfig);
+      setVerifiedPaymentConfig(mapped);
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || signal?.aborted) return;
+      setVerifiedPaymentConfig(null);
+      setPaymentConfigError(
+        err?.message ||
+          'Não foi possível verificar os métodos de pagamento disponíveis no servidor.'
+      );
+    } finally {
+      if (!signal?.aborted) {
+        setIsLoadingPaymentConfig(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const abortController = new AbortController();
+    loadAuthoritativePaymentConfig(abortController.signal);
+    return () => {
+      abortController.abort();
+    };
+  }, []);
+
+  // Garantir que o método selecionado esteja sempre habilitado na configuração verificada atual
+  useEffect(() => {
+    if (!isPaymentConfigVerified) return;
+    const isCurrentAllowed =
+      (selectedMethod === 'pix' && pixEnabled) ||
+      (selectedMethod === 'credit_card' && creditCardEnabled) ||
+      (selectedMethod === 'boleto' && boletoEnabled);
+
+    if (!isCurrentAllowed) {
+      setSelectedMethod(getFirstEnabledMethod());
+    }
+  }, [isPaymentConfigVerified, pixEnabled, creditCardEnabled, boletoEnabled, selectedMethod]);
 
   // Compute totals
   const subtotal = selectedBatches.reduce(
@@ -67,15 +214,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       const now = Date.now();
       const diffSecs = Math.max(0, Math.floor((expiresAt - now) / 1000));
       setSecondsRemaining(diffSecs);
-
-      if (diffSecs <= 0) {
-        setIsOrderExpired(true);
-        setOrderPaymentStatus('cancelled');
-        clearInterval(timerInterval);
-      }
+      // Nunca cancela unilateralmente no cliente sem antes reconciliar via polling no servidor
     }, 1000);
 
-    // Polling a cada 5 segundos para verificar confirmação ou cancelamento pelo gateway
+    // Polling a cada 5 segundos para verificar confirmação ou cancelamento reconciliado pelo gateway
     const pollingInterval = setInterval(async () => {
       try {
         const statusRes = await ordersService.getOrderStatus(registeredOrder.order.id);
@@ -83,7 +225,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           setOrderPaymentStatus('approved');
           clearInterval(pollingInterval);
           clearInterval(timerInterval);
-        } else if (statusRes.status === 'cancelled' || statusRes.expired) {
+          if (onPaymentApproved) {
+            onPaymentApproved(registeredOrder.order.id);
+          }
+        } else if (statusRes.status === 'cancelled' || (statusRes.expired && !statusRes.reconciliation_pending)) {
           setIsOrderExpired(true);
           setOrderPaymentStatus('cancelled');
           clearInterval(pollingInterval);
@@ -98,9 +243,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       clearInterval(timerInterval);
       clearInterval(pollingInterval);
     };
-  }, [registeredOrder, orderPaymentStatus]);
+  }, [registeredOrder, orderPaymentStatus, onPaymentApproved]);
 
   const handleCheckout = async () => {
+    if (processing) return;
     setOrderError(null);
 
     // 1. Bloqueio Estrito no Frontend: Eventos de demonstração não podem aceitar pedidos comerciais
@@ -111,11 +257,39 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       return;
     }
 
+    if (!isPaymentConfigVerified || (!pixEnabled && !creditCardEnabled && !boletoEnabled)) {
+      setOrderError(
+        paymentConfigError ||
+          'Operação bloqueada: não foi possível validar os métodos de pagamento disponíveis no servidor.'
+      );
+      return;
+    }
+
+    const trimmedName = buyerName.trim();
+    const trimmedEmail = buyerEmail.trim();
+    const normalizedCpf = buyerCpf.replace(/\D/g, '');
+
+    if (trimmedName.length < 3) {
+      setOrderError('Informe o nome completo do titular do ingresso.');
+      return;
+    }
+
+    if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setOrderError('Informe um endereço de e-mail válido para o envio da confirmação do pedido.');
+      return;
+    }
+
+    if (!isValidBrazilianCpfClient(normalizedCpf)) {
+      setOrderError('Informe um CPF brasileiro válido (11 dígitos com dígitos verificadores reais).');
+      return;
+    }
+
     setProcessing(true);
 
     try {
-      // 2. Registro oficial do pedido no backend com cálculo autoritativo e reserva atômica de estoque
+      // 2. Registro oficial do pedido no backend com order_id idempotente, cálculo autoritativo e reserva atômica de estoque
       const data = await ordersService.createOrder({
+        order_id: checkoutAttemptId,
         event_id: event.id,
         event_title: event.title,
         items: selectedBatches.map((item) => ({
@@ -126,18 +300,24 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
         })),
         buyer: {
           id: user?.id,
-          name: buyerName,
-          email: buyerEmail,
-          cpf: buyerCpf,
+          name: trimmedName,
+          email: trimmedEmail,
+          cpf: normalizedCpf,
         },
         payment_method: selectedMethod,
       });
 
-      // O pedido é registrado como PENDENTE. O frontend NUNCA emite ingressos pagos diretamente.
+      // O pedido é registrado como PENDENTE (ou aprovado caso já reconciliado).
       setRegisteredOrder(data);
-      setOrderPaymentStatus('pending');
+      const returnedStatus = data.payment?.status === 'approved' || data.order?.payment_status === 'approved'
+        ? 'approved'
+        : 'pending';
+      setOrderPaymentStatus(returnedStatus);
       setIsOrderExpired(false);
       setSecondsRemaining(data.payment?.expires_in_seconds || 900);
+      if (returnedStatus === 'approved' && onPaymentApproved && data.order?.id) {
+        onPaymentApproved(data.order.id);
+      }
     } catch (err: any) {
       console.error('Erro ao processar pedido:', err);
       setOrderError(err.message || 'Erro de conexão ao processar pedido.');
@@ -311,9 +491,21 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 <span className="font-bold uppercase text-white">{registeredOrder.order?.payment_method}</span>
               </div>
 
-              {/* Seção Pix Copia e Cola (Apenas se pendente e não expirado) */}
+              {/* Seção QR Code Oficial e Pix Copia e Cola (Apenas se pendente e não expirado) */}
               {orderPaymentStatus === 'pending' && !isOrderExpired && registeredOrder.payment?.pix_copy_paste && (
-                <div className="pt-2 space-y-2">
+                <div className="pt-2 space-y-3">
+                  {registeredOrder.payment?.pix_qr_code_base64 && (
+                    <div className="flex flex-col items-center justify-center bg-[#111] border border-[#2a2a2a] rounded-2xl p-4 space-y-2">
+                      <img
+                        src={`data:image/png;base64,${registeredOrder.payment.pix_qr_code_base64}`}
+                        alt="QR Code Pix Oficial Mercado Pago"
+                        className="w-44 h-44 rounded-xl bg-white p-2 object-contain"
+                      />
+                      <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider">
+                        Escaneie o QR Code no aplicativo do seu banco
+                      </span>
+                    </div>
+                  )}
                   <div className="flex flex-wrap justify-between items-center gap-1">
                     <label className="text-[10px] text-zinc-400 uppercase font-semibold">
                       Código Pix Copia e Cola (Mercado Pago)
@@ -364,6 +556,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 <>
                   <button
                     onClick={() => {
+                      setCheckoutAttemptId(generateClientUuidV4());
                       setRegisteredOrder(null);
                       setIsOrderExpired(false);
                       setOrderPaymentStatus('pending');
@@ -494,128 +687,167 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
                 </label>
                 <input
                   type="text"
+                  placeholder="Nome completo do comprador"
                   value={buyerName}
                   onChange={(e) => setBuyerName(e.target.value)}
-                  className="w-full bg-[#181818] border border-[#2a2a2a] rounded-xl px-3 py-2 text-xs text-white"
+                  className="w-full bg-[#181818] border border-[#2a2a2a] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600"
                 />
               </div>
               <div>
                 <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1">
-                  CPF
+                  CPF do Titular
                 </label>
                 <input
                   type="text"
+                  inputMode="numeric"
+                  placeholder="000.000.000-00"
                   value={buyerCpf}
-                  onChange={(e) => setBuyerCpf(e.target.value)}
-                  className="w-full bg-[#181818] border border-[#2a2a2a] rounded-xl px-3 py-2 text-xs text-white"
+                  onChange={(e) => setBuyerCpf(formatCpfMask(e.target.value))}
+                  className="w-full bg-[#181818] border border-[#2a2a2a] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 font-mono"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="text-[10px] text-zinc-400 uppercase font-semibold block mb-1">
+                  E-mail do Comprador
+                </label>
+                <input
+                  type="email"
+                  placeholder="seuemail@dominio.com.br"
+                  value={buyerEmail}
+                  onChange={(e) => setBuyerEmail(e.target.value)}
+                  className="w-full bg-[#181818] border border-[#2a2a2a] rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600"
                 />
               </div>
             </div>
 
             {/* Payment Method Selector (Pix, Cartão, Boleto) */}
             <div className="space-y-3">
-              {/* Option 1: Pix */}
-              <div
-                onClick={() => setSelectedMethod('pix')}
-                className={`cursor-pointer p-4 rounded-2xl border transition flex items-center justify-between ${
-                  selectedMethod === 'pix'
-                    ? 'bg-[#181818] border-[#FF1A2D] shadow-[0_0_15px_rgba(255,26,45,0.2)]'
-                    : 'bg-[#151515] border-[#262626] hover:border-[#383838]'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-5 h-5 rounded-full border flex items-center justify-center ${
-                      selectedMethod === 'pix'
-                        ? 'border-[#FF1A2D] bg-[#FF1A2D]'
-                        : 'border-[#444]'
-                    }`}
-                  >
-                    {selectedMethod === 'pix' && <div className="w-2 h-2 rounded-full bg-white" />}
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-white uppercase">Pix</span>
-                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
-                        5% de desconto
-                      </span>
+              {isLoadingPaymentConfig && (
+                <div className="bg-[#181818] border border-[#262626] p-4 rounded-2xl flex items-center gap-3 text-xs text-zinc-300">
+                  <Loader2 className="w-4 h-4 text-[#FF1A2D] animate-spin shrink-0" />
+                  <span>Verificando métodos de pagamento disponíveis no servidor...</span>
+                </div>
+              )}
+
+              {!isLoadingPaymentConfig && (paymentConfigError || !isPaymentConfigVerified) && (
+                <div className="bg-red-950/40 border border-red-500/40 p-4 rounded-2xl space-y-3 text-xs text-red-200">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-bold uppercase tracking-wider text-red-300 text-[11px]">
+                        Métodos de Pagamento Indisponíveis no Momento
+                      </p>
+                      <p className="text-[11px] text-zinc-300 leading-relaxed">
+                        {paymentConfigError ||
+                          'Não foi possível carregar as configurações de pagamento do servidor. Nenhum método de pagamento pode ser exibido ou utilizado até que a validação seja concluída.'}
+                      </p>
                     </div>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                      Aprovação imediata e emissão automática do QR Code
-                    </p>
                   </div>
-                </div>
-                <QrCode className="w-5 h-5 text-emerald-400" />
-              </div>
-
-              {/* Option 2: Cartão de Crédito */}
-              <div
-                onClick={() => setSelectedMethod('credit_card')}
-                className={`cursor-pointer p-4 rounded-2xl border transition flex items-center justify-between ${
-                  selectedMethod === 'credit_card'
-                    ? 'bg-[#181818] border-[#FF1A2D] shadow-[0_0_15px_rgba(255,26,45,0.2)]'
-                    : 'bg-[#151515] border-[#262626] hover:border-[#383838]'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-5 h-5 rounded-full border flex items-center justify-center ${
-                      selectedMethod === 'credit_card'
-                        ? 'border-[#FF1A2D] bg-[#FF1A2D]'
-                        : 'border-[#444]'
-                    }`}
+                  <button
+                    type="button"
+                    onClick={() => loadAuthoritativePaymentConfig()}
+                    className="bg-[#181818] hover:bg-[#222] border border-[#2a2a2a] text-white font-semibold text-[11px] px-3.5 py-2 rounded-xl transition flex items-center gap-2"
                   >
-                    {selectedMethod === 'credit_card' && (
-                      <div className="w-2 h-2 rounded-full bg-white" />
-                    )}
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-white uppercase">Cartão de Crédito</span>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                      Parcelamento em até 12x via Mercado Pago
-                    </p>
-                  </div>
+                    <RefreshCw className="w-3.5 h-3.5 text-[#FF1A2D]" />
+                    <span>Tentar Novamente</span>
+                  </button>
                 </div>
-                <CreditCard className="w-5 h-5 text-zinc-400" />
-              </div>
+              )}
 
-              {/* Option 3: Boleto Bancário */}
-              <div
-                onClick={() => setSelectedMethod('boleto')}
-                className={`cursor-pointer p-4 rounded-2xl border transition flex items-center justify-between ${
-                  selectedMethod === 'boleto'
-                    ? 'bg-[#181818] border-[#FF1A2D] shadow-[0_0_15px_rgba(255,26,45,0.2)]'
-                    : 'bg-[#151515] border-[#262626] hover:border-[#383838]'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-5 h-5 rounded-full border flex items-center justify-center ${
-                      selectedMethod === 'boleto'
-                        ? 'border-[#FF1A2D] bg-[#FF1A2D]'
-                        : 'border-[#444]'
-                    }`}
-                  >
-                    {selectedMethod === 'boleto' && (
-                      <div className="w-2 h-2 rounded-full bg-white" />
-                    )}
+              {/* Option 1: Pix */}
+              {pixEnabled && (
+                <div
+                  onClick={() => setSelectedMethod('pix')}
+                  className={`cursor-pointer p-4 rounded-2xl border transition flex items-center justify-between ${
+                    selectedMethod === 'pix'
+                      ? 'bg-[#181818] border-[#FF1A2D] shadow-[0_0_15px_rgba(255,26,45,0.2)]'
+                      : 'bg-[#151515] border-[#262626] hover:border-[#383838]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-5 h-5 rounded-full border flex items-center justify-center ${
+                        selectedMethod === 'pix'
+                          ? 'border-[#FF1A2D] bg-[#FF1A2D]'
+                          : 'border-[#444]'
+                      }`}
+                    >
+                      {selectedMethod === 'pix' && <div className="w-2 h-2 rounded-full bg-white" />}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-white uppercase">Pix</span>
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
+                          5% de desconto
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">
+                        Aprovação imediata e emissão automática do QR Code
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-xs font-bold text-white uppercase">Boleto Bancário</span>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                      Compensação em até 1 a 3 dias úteis
-                    </p>
-                  </div>
+                  <QrCode className="w-5 h-5 text-emerald-400" />
                 </div>
-                <FileText className="w-5 h-5 text-zinc-400" />
-              </div>
+              )}
+
+              {/* Option 2: Cartão de Crédito (Bloqueado até implementação do fluxo real) */}
+              {isPaymentConfigVerified && (
+                <div
+                  aria-disabled="true"
+                  className="opacity-60 cursor-not-allowed p-4 rounded-2xl border bg-[#141414] border-[#222] flex items-center justify-between select-none"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-5 h-5 rounded-full border border-[#333] flex items-center justify-center bg-[#1a1a1a]">
+                      <Lock className="w-2.5 h-2.5 text-zinc-500" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-zinc-400 uppercase">Cartão de Crédito</span>
+                        <span className="text-[10px] bg-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-full border border-zinc-700">
+                          Indisponível (Em Homologação)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">
+                        Temporariamente bloqueado. Utilize o pagamento imediato via Pix.
+                      </p>
+                    </div>
+                  </div>
+                  <CreditCard className="w-5 h-5 text-zinc-600" />
+                </div>
+              )}
+
+              {/* Option 3: Boleto Bancário (Bloqueado até implementação do fluxo real) */}
+              {isPaymentConfigVerified && (
+                <div
+                  aria-disabled="true"
+                  className="opacity-60 cursor-not-allowed p-4 rounded-2xl border bg-[#141414] border-[#222] flex items-center justify-between select-none"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-5 h-5 rounded-full border border-[#333] flex items-center justify-center bg-[#1a1a1a]">
+                      <Lock className="w-2.5 h-2.5 text-zinc-500" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-zinc-400 uppercase">Boleto Bancário</span>
+                        <span className="text-[10px] bg-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-full border border-zinc-700">
+                          Indisponível (Em Homologação)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">
+                        Temporariamente bloqueado. Utilize o pagamento imediato via Pix.
+                      </p>
+                    </div>
+                  </div>
+                  <FileText className="w-5 h-5 text-zinc-600" />
+                </div>
+              )}
             </div>
 
             {/* Action Buttons */}
             <div className="pt-4 space-y-3">
               <button
                 onClick={handleCheckout}
-                disabled={processing || subtotal === 0 || event.is_demo}
+                disabled={processing || subtotal === 0 || event.is_demo || !isPaymentConfigVerified}
                 className="w-full bg-[#FF1A2D] hover:bg-[#e00f21] disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wider py-3.5 rounded-xl shadow-[0_0_20px_rgba(255,26,45,0.45)] transition transform hover:-translate-y-0.5 flex items-center justify-center gap-2"
               >
                 {event.is_demo ? (

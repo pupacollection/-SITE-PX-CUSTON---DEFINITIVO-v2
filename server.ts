@@ -22,6 +22,29 @@ import {
   VALID_USER_ROLES,
 } from './src/lib/userRoleValidator';
 import { sendOrderConfirmationEmailIfNeeded } from './src/lib/orderConfirmationMailer';
+import {
+  readPersistedPaymentSettings,
+  inspectPersistedPaymentSettings,
+  resolveAuthoritativePaymentSettings,
+  evaluateCheckoutPaymentMethodGate,
+  isServerSupabaseSecretConfigured,
+  isServerAccessTokenConfigured,
+  buildCanonicalPaymentConfigResponse,
+  executeAuthenticatedPaymentSettingsUpdate,
+  isPaymentMethodAllowedByConfig,
+  resolveOperationalEnvironment,
+} from './src/lib/paymentSettingsValidator';
+import {
+  evaluateWebhookSecurityGate,
+  verifyMercadoPagoWebhookSignature,
+  isPaymentMethodImplemented,
+  createOrRecoverMercadoPagoPixPayment,
+  reconcileMercadoPagoPixPaymentByOrder,
+  persistMercadoPagoPixChargeLink,
+  createMpTimeoutSignal,
+  isValidBrazilianCpf,
+  normalizeCpfDigits,
+} from './src/lib/mercadoPagoGateway';
 
 dotenv.config();
 
@@ -31,7 +54,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const isProd = process.env.NODE_ENV === 'production';
-const isProductionEnvironment = () => process.env.PX_ENVIRONMENT === 'production' || process.env.NODE_ENV === 'production' || isProd;
+const isProductionEnvironment = () => resolveOperationalEnvironment(process.env).isProductionSecurity;
 
 // Aceitar payloads com imagens codificadas em Base64 (ícones PWA multi-resolução)
 app.use(express.json({ limit: '10mb' }));
@@ -324,15 +347,18 @@ app.post(
         if (fs.existsSync(bakMaskable)) fs.unlinkSync(bakMaskable);
       } catch {}
 
-      // Auditoria no banco (se tabela audit_logs estiver disponível)
+      // Auditoria no banco (alinhado ao schema oficial de public.audit_logs: actor_id, action, entity, entity_id, details)
       try {
-        await supabaseAdmin.from('audit_logs').insert({
+        const { error: auditErr } = await supabaseAdmin.from('audit_logs').insert({
           actor_id: req.user.id,
           action: 'UPDATE_PWA_BRANDING_ICONS',
-          resource_type: 'site_settings',
-          resource_id: 'pwa_branding',
-          payload: { updated_by: req.user.email, timestamp },
+          entity: 'site_settings',
+          entity_id: 'pwa_branding',
+          details: { updated_by: req.user.email, timestamp, is_custom: true },
         });
+        if (auditErr) {
+          console.warn('[Branding] Aviso ao registrar auditoria UPDATE_PWA_BRANDING_ICONS:', auditErr.message);
+        }
       } catch {
         // Tolerante
       }
@@ -379,13 +405,16 @@ app.post(
       fs.renameSync(tmpJson, BRANDING_FILE_PATH);
 
       try {
-        await supabaseAdmin.from('audit_logs').insert({
+        const { error: auditErr } = await supabaseAdmin.from('audit_logs').insert({
           actor_id: req.user.id,
           action: 'RESET_PWA_BRANDING_ICONS',
-          resource_type: 'site_settings',
-          resource_id: 'pwa_branding',
-          payload: { updated_by: req.user.email, timestamp },
+          entity: 'site_settings',
+          entity_id: 'pwa_branding',
+          details: { updated_by: req.user.email, timestamp, is_custom: false },
         });
+        if (auditErr) {
+          console.warn('[Branding] Aviso ao registrar auditoria RESET_PWA_BRANDING_ICONS:', auditErr.message);
+        }
       } catch {
         // Tolerante
       }
@@ -1160,25 +1189,81 @@ app.post('/api/cache/purge', requireAuth, requireRole(['ADMIN', 'SUPER_ADMIN']),
 // ==========================================
 
 // Configuração segura do Mercado Pago (Expõe apenas dados públicos ao frontend, secrets preservados no backend)
-app.get('/api/payments/config', (req: Request, res: Response) => {
-  const hasAccessToken = Boolean(
-    process.env.MP_ACCESS_TOKEN &&
-    !process.env.MP_ACCESS_TOKEN.includes('placeholder') &&
-    !process.env.MP_ACCESS_TOKEN.includes('****')
-  );
-  const publicKey = process.env.MP_PUBLIC_KEY || process.env.VITE_MP_PUBLIC_KEY || '';
-  const environment = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
-
-  res.json({
-    configured: hasAccessToken,
-    environment,
-    public_key: publicKey,
-    pix_enabled: true,
-    pix_instant_enabled: true,
-    credit_card_enabled: true,
-    boleto_enabled: false,
-  });
+app.get('/api/payments/config', async (req: Request, res: Response) => {
+  try {
+    const inspection = await resolveAuthoritativePaymentSettings({
+      supabaseClient: isServerSupabaseSecretConfigured() ? supabaseAdmin : undefined,
+      requireDurableSync: isProductionEnvironment(),
+    });
+    if (!inspection.ok || !inspection.settings) {
+      return res.status(inspection.statusCode || 503).json({
+        error: inspection.error || 'Configurações de pagamento indisponíveis ou corrompidas no servidor.',
+        code: inspection.code || 'PAYMENT_SETTINGS_CORRUPTED',
+      });
+    }
+    const canonicalResponse = buildCanonicalPaymentConfigResponse(inspection.settings);
+    return res.json(canonicalResponse);
+  } catch (err: any) {
+    console.error('[PX CONTROL Payments] Erro ao consultar configuração de pagamento:', err);
+    return res.status(503).json({
+      error: 'Falha ao carregar configurações de pagamento no servidor.',
+      code: 'PAYMENT_SETTINGS_UNAVAILABLE',
+    });
+  }
 });
+
+// Rota administrativa autenticada para leitura de configuração de pagamentos
+app.get(
+  '/api/admin/payments/config',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const inspection = await resolveAuthoritativePaymentSettings({
+        supabaseClient: isServerSupabaseSecretConfigured() ? supabaseAdmin : undefined,
+        requireDurableSync: isProductionEnvironment(),
+      });
+      if (!inspection.ok || !inspection.settings) {
+        return res.status(inspection.statusCode || 503).json({
+          error: inspection.error || 'Configurações de pagamento indisponíveis ou corrompidas no servidor.',
+          code: inspection.code || 'PAYMENT_SETTINGS_CORRUPTED',
+        });
+      }
+      const canonicalResponse = buildCanonicalPaymentConfigResponse(inspection.settings);
+      return res.json(canonicalResponse);
+    } catch (err: any) {
+      console.error('[PX CONTROL Payments] Erro ao consultar configuração administrativa de pagamento:', err);
+      return res.status(503).json({
+        error: 'Falha ao carregar configurações de pagamento no servidor.',
+        code: 'PAYMENT_SETTINGS_UNAVAILABLE',
+      });
+    }
+  }
+);
+
+// Handler unificado para gravação administrativa persistente de configurações do Mercado Pago
+const handleAdminPaymentSettingsSave = async (req: AuthenticatedRequest, res: Response) => {
+  const result = await executeAuthenticatedPaymentSettingsUpdate({
+    authHeader: req.headers.authorization,
+    payload: req.body,
+    supabaseClient: supabaseAdmin,
+  });
+  return res.status(result.statusCode).json(result.payload);
+};
+
+app.put(
+  '/api/admin/payments/config',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  handleAdminPaymentSettingsSave
+);
+
+app.post(
+  '/api/admin/payments/config',
+  requireAuth,
+  requireRole(['ADMIN', 'SUPER_ADMIN']),
+  handleAdminPaymentSettingsSave
+);
 
 interface InMemoryOrder {
   id: string;
@@ -1194,6 +1279,8 @@ interface InMemoryOrder {
   payment_status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'in_process' | 'refunded';
   buyer: { id?: string; name: string; email: string; cpf?: string };
   created_at: string;
+  mercado_pago_id?: string | null;
+  already_processed?: boolean;
 }
 
 const ordersStore = new Map<string, InMemoryOrder>();
@@ -1271,10 +1358,60 @@ async function resolveBuyerProfile(buyerInfo: { id?: string; name: string; email
 
 // Endpoint Oficial: Criação Autoritativa de Pedidos com Garantia Transacional
 app.post('/api/orders/create', async (req: Request, res: Response) => {
-  const { event_id, items, buyer, payment_method, event_title } = req.body;
+  const { event_id, items, buyer, payment_method, event_title } = req.body || {};
 
   if (!event_id || !items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'Dados do pedido incompletos ou inválidos.' });
+  }
+
+  // Validar formato UUID de order_id quando enviado pelo cliente (idempotência fim a fim)
+  const rawOrderId = req.body?.order_id;
+  if (rawOrderId !== undefined && rawOrderId !== null && String(rawOrderId).trim() !== '') {
+    if (typeof rawOrderId !== 'string' || !isValidUuid(rawOrderId.trim())) {
+      return res.status(400).json({
+        error: 'Parâmetro inválido: order_id deve ser um UUID v4 válido.',
+        code: 'INVALID_ORDER_ID_FORMAT',
+      });
+    }
+  }
+
+  // Validar CPF do comprador quando informado no payload (Mod 11 + rejeição de sequências repetidas/placeholders)
+  if (buyer?.cpf !== undefined && buyer?.cpf !== null && String(buyer.cpf).trim() !== '') {
+    if (!isValidBrazilianCpf(String(buyer.cpf))) {
+      return res.status(400).json({
+        error:
+          'CPF do comprador inválido. Informe um CPF brasileiro real de 11 dígitos com dígitos verificadores válidos.',
+        code: 'INVALID_BUYER_CPF',
+      });
+    }
+  }
+
+  // Verificar se o método solicitado possui implementação real ativa (Cartão e Boleto permanecem bloqueados)
+  const methodImplementation = isPaymentMethodImplemented(payment_method);
+  if (!methodImplementation.implemented) {
+    return res.status(400).json({
+      error: methodImplementation.error,
+      code: methodImplementation.code,
+    });
+  }
+
+  // Verificar de forma fail-closed se as configurações duráveis de pagamento são íntegras e se o método está habilitado
+  const paymentGate = await evaluateCheckoutPaymentMethodGate({
+    paymentMethod: methodImplementation.normalizedMethod,
+    supabaseClient: isServerSupabaseSecretConfigured() ? supabaseAdmin : undefined,
+    requireDurableSync: isProductionEnvironment(),
+  });
+  if (!paymentGate.allowed) {
+    if (paymentGate.statusCode >= 500) {
+      console.error(
+        '[PX CUSTON Checkout] Bloqueio de segurança (fail-closed): configurações de pagamento corrompidas ou inacessíveis:',
+        paymentGate.error
+      );
+    }
+    return res.status(paymentGate.statusCode).json({
+      error: paymentGate.error,
+      code: paymentGate.code,
+    });
   }
 
   // 1. Bloqueio Rigoroso de Pedidos em Eventos de Demonstração (is_demo = true)
@@ -1322,15 +1459,7 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
     });
   }
 
-  // 2. Resolver o ID oficial do comprador no banco de perfis
-  const buyerUserId = await resolveBuyerProfile(buyer, req.headers.authorization);
-  if (!buyerUserId) {
-    return res.status(400).json({
-      error: 'Não foi possível associar um perfil de usuário válido ao comprador para persistência oficial do pedido.',
-    });
-  }
-
-  // Sanitizar itens do payload
+  // Sanitizar itens do payload antes de reservar estoque ou acionar o gateway
   const formattedItems: { batch_id: string; quantity: number }[] = [];
   for (const it of items) {
     const qty = parseInt(it.quantity, 10);
@@ -1340,22 +1469,216 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
     formattedItems.push({ batch_id: it.batch_id, quantity: qty });
   }
 
+  // Exigir credencial MP_ACCESS_TOKEN configurada no servidor antes de reservar estoque (sem fallback para Pix estático)
+  if (!isServerAccessTokenConfigured(process.env.MP_ACCESS_TOKEN)) {
+    console.error('[PX CUSTON Checkout] MP_ACCESS_TOKEN ausente no servidor. Operação abortada de forma fail-closed sem reservar estoque.');
+    return res.status(503).json({
+      error:
+        'Serviço de checkout temporariamente indisponível: O gateway oficial do Mercado Pago (MP_ACCESS_TOKEN) não está configurado no servidor. Nenhuma reserva ou cobrança foi efetuada.',
+      code: 'MP_GATEWAY_NOT_CONFIGURED',
+    });
+  }
+
+  // Exigir CPF válido do comprador antes de reservar estoque para emissão de Pix real
+  const normalizedBuyerCpf = normalizeCpfDigits(buyer?.cpf);
+  if (!isValidBrazilianCpf(normalizedBuyerCpf)) {
+    return res.status(400).json({
+      error:
+        'CPF do comprador obrigatório e deve ser um CPF brasileiro válido (11 dígitos verificados) para emissão de cobrança Pix no Mercado Pago.',
+      code: 'INVALID_BUYER_CPF',
+    });
+  }
+
+  // 2. Resolver o ID oficial do comprador no banco de perfis
+  const buyerUserId = await resolveBuyerProfile(
+    { ...buyer, cpf: normalizedBuyerCpf },
+    req.headers.authorization
+  );
+  if (!buyerUserId) {
+    return res.status(400).json({
+      error: 'Não foi possível associar um perfil de usuário válido ao comprador para persistência oficial do pedido.',
+    });
+  }
+
+  // Helper para emitir ou recuperar a cobrança Pix real no Mercado Pago com reconciliação obrigatória antes de liberar estoque
+  const finalizeOrderWithRealPixCharge = async (orderRecord: InMemoryOrder) => {
+    const pixResult = await createOrRecoverMercadoPagoPixPayment({
+      order: orderRecord,
+      mpAccessToken: process.env.MP_ACCESS_TOKEN,
+      appUrl: process.env.APP_URL,
+      supabaseClient: supabaseAdmin,
+    });
+
+    if (!pixResult.ok || !pixResult.payment) {
+      // REGRA DE INTEGRIDADE FINANCEIRA:
+      // Somente cancelar o pedido e liberar o estoque quando houver certeza de que NENHUMA cobrança Pix foi criada no Mercado Pago
+      // (shouldReleaseStock === true && !inconclusive).
+      if (pixResult.shouldReleaseStock === true && !pixResult.inconclusive) {
+        try {
+          await supabaseAdmin.rpc('cancel_order_and_release_stock', {
+            p_order_id: orderRecord.id,
+            p_reason: 'mp_pix_creation_confirmed_absent',
+          });
+        } catch (rollbackErr) {
+          console.error('[PX CUSTON Checkout] Erro ao liberar estoque após falha confirmada sem cobrança no Pix:', rollbackErr);
+        }
+        ordersStore.delete(orderRecord.id);
+
+        return res.status(pixResult.statusCode || 502).json({
+          error:
+            pixResult.error ||
+            'Falha ao gerar cobrança Pix oficial no Mercado Pago. Confirmado que nenhuma cobrança foi gerada; o estoque foi liberado.',
+          code: pixResult.code || 'MP_PIX_CREATION_FAILED',
+          order_cancelled: true,
+          stock_released: true,
+          reconciliation_pending: false,
+        });
+      }
+
+      // Resultado inconclusivo (timeout, falha de rede, HTTP 5xx ou falha de persistência de cobrança já criada):
+      // NUNCA cancelar o pedido nem liberar o estoque automaticamente!
+      ordersStore.set(orderRecord.id, orderRecord);
+      console.warn(
+        `[PX CUSTON Checkout] ⚠️ Pedido ${orderRecord.id} mantido em estado seguro para reconciliação (sem liberar estoque): ${pixResult.code}`
+      );
+      return res.status(pixResult.statusCode || 503).json({
+        error:
+          pixResult.error ||
+          'A comunicação com o Mercado Pago oscilou durante a emissão do Pix. O pedido e o estoque foram preservados com segurança para reconciliação.',
+        code: pixResult.code || 'MP_PIX_RECONCILIATION_INCONCLUSIVE',
+        order_id: orderRecord.id,
+        order_cancelled: false,
+        stock_released: false,
+        reconciliation_pending: true,
+      });
+    }
+
+    orderRecord.mercado_pago_id = pixResult.payment.id;
+    if (pixResult.payment.status === 'approved') {
+      orderRecord.payment_status = 'approved';
+      try {
+        await supabaseAdmin.rpc('confirm_order_and_issue_tickets', {
+          p_order_id: orderRecord.id,
+          p_mercado_pago_id: String(pixResult.payment.id),
+        });
+      } catch (confirmErr) {
+        console.error('[PX CUSTON Checkout] Erro ao confirmar pedido já aprovado durante reconciliação:', confirmErr);
+      }
+    }
+
+    ordersStore.set(orderRecord.id, orderRecord);
+    return res.json({
+      success: true,
+      order: orderRecord,
+      payment: pixResult.payment,
+    });
+  };
+
   // 3. Execução Atômica via Procedimento PostgreSQL com ROW LOCKING (FOR UPDATE)
-  // Gera identificador único de idempotência para o pedido (evitando reprocessamento ou duplicidade)
-  const clientOrderId = (req.body.order_id && typeof req.body.order_id === 'string' && req.body.order_id.length > 10)
-    ? req.body.order_id
-    : crypto.randomUUID();
+  // Utiliza o UUID idempotente enviado pelo frontend ou gera um novo caso não informado
+  const clientOrderId =
+    typeof rawOrderId === 'string' && isValidUuid(rawOrderId.trim())
+      ? rawOrderId.trim().toLowerCase()
+      : crypto.randomUUID();
+
+  // Pré-verificação de idempotência e estado financeiro se o pedido já existir em public.orders
+  if (typeof rawOrderId === 'string' && isValidUuid(rawOrderId.trim())) {
+    try {
+      const { data: preExistingOrder } = await supabaseAdmin
+        .from('orders')
+        .select(
+          'id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, mercado_pago_id, created_at, order_items(batch_id, quantity, unit_price, subtotal)'
+        )
+        .eq('id', clientOrderId)
+        .maybeSingle();
+
+      if (preExistingOrder && preExistingOrder.id) {
+        const idempotencyCheck = verifyOrderIdempotencyMatch({
+          existingOrder: {
+            id: preExistingOrder.id,
+            user_id: preExistingOrder.user_id,
+            event_id: preExistingOrder.event_id,
+            payment_method: preExistingOrder.payment_method,
+            items: ((preExistingOrder as any).order_items || []).map((oi: any) => ({
+              batch_id: oi.batch_id,
+              quantity: Number(oi.quantity),
+            })),
+          },
+          requestedUserId: buyerUserId,
+          requestedEventId: event_id,
+          requestedPaymentMethod: 'pix',
+          requestedItems: formattedItems,
+        });
+
+        if (!idempotencyCheck.compatible) {
+          return res.status(409).json({
+            error:
+              idempotencyCheck.errorMessage ||
+              'Conflito de idempotência: o order_id informado pertence a outro pedido com parâmetros divergentes.',
+            code: 'ORDER_IDEMPOTENCY_CONFLICT',
+          });
+        }
+
+        // Nunca reutilizar pedido já cancelado, rejeitado ou estornado
+        if (
+          preExistingOrder.payment_status === 'cancelled' ||
+          preExistingOrder.payment_status === 'rejected' ||
+          preExistingOrder.payment_status === 'refunded'
+        ) {
+          return res.status(409).json({
+            error:
+              'Este pedido já foi encerrado/cancelado anteriormente e seu estoque foi liberado. Inicie uma nova tentativa de compra.',
+            code: 'ORDER_ALREADY_TERMINATED',
+            status: preExistingOrder.payment_status,
+          });
+        }
+
+        const existingOrderRecord: InMemoryOrder = {
+          id: preExistingOrder.id,
+          user_id: preExistingOrder.user_id,
+          event_id: preExistingOrder.event_id,
+          event_title: dbEvent?.title || event_title || 'PX CUSTON',
+          items: ((preExistingOrder as any).order_items || []).map((oi: any) => ({
+            batch_id: oi.batch_id,
+            batch_name: 'Ingresso PX',
+            quantity: Number(oi.quantity),
+            unit_price: Number(oi.unit_price),
+            subtotal: Number(oi.subtotal),
+          })),
+          subtotal: Number(preExistingOrder.subtotal),
+          convenience_fee: Number(preExistingOrder.convenience_fee),
+          discount: Number(preExistingOrder.discount),
+          total: Number(preExistingOrder.total),
+          payment_method: preExistingOrder.payment_method || 'pix',
+          payment_status: preExistingOrder.payment_status,
+          buyer: {
+            id: buyerUserId,
+            name: buyer?.name || 'Cliente PX',
+            email: buyer?.email || '',
+            cpf: normalizedBuyerCpf,
+          },
+          created_at: preExistingOrder.created_at,
+          mercado_pago_id: (preExistingOrder as any).mercado_pago_id || null,
+          already_processed: true,
+        };
+
+        return await finalizeOrderWithRealPixCharge(existingOrderRecord);
+      }
+    } catch {
+      // Segue para execução transacional da RPC
+    }
+  }
 
   try {
     const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('process_order_checkout', {
       p_event_id: event_id,
       p_user_id: buyerUserId,
       p_items: formattedItems,
-      p_payment_method: payment_method || 'pix',
+      p_payment_method: 'pix',
       p_buyer_info: {
         name: buyer?.name || 'Cliente PX',
         email: buyer?.email || '',
-        cpf: buyer?.cpf || '',
+        cpf: normalizedBuyerCpf,
       },
       p_order_id: clientOrderId,
     });
@@ -1415,7 +1738,7 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
           },
           requestedUserId: buyerUserId,
           requestedEventId: event_id,
-          requestedPaymentMethod: payment_method || 'pix',
+          requestedPaymentMethod: 'pix',
           requestedItems: formattedItems,
         });
 
@@ -1425,11 +1748,20 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
           });
         }
 
-        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} recuperado com sucesso após oscilação.`);
-        const mpAccessToken = process.env.MP_ACCESS_TOKEN;
-        const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
-        const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        if (
+          checkedOrder.payment_status === 'cancelled' ||
+          checkedOrder.payment_status === 'rejected' ||
+          checkedOrder.payment_status === 'refunded'
+        ) {
+          return res.status(409).json({
+            error:
+              'Este pedido já foi encerrado/cancelado anteriormente e seu estoque foi liberado. Inicie uma nova tentativa de compra.',
+            code: 'ORDER_ALREADY_TERMINATED',
+            status: checkedOrder.payment_status,
+          });
+        }
 
+        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} recuperado com sucesso após oscilação.`);
         const recoveredOrder: InMemoryOrder = {
           id: checkedOrder.id,
           user_id: checkedOrder.user_id,
@@ -1452,78 +1784,57 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
             id: buyerUserId,
             name: buyer?.name || 'Cliente PX',
             email: buyer?.email || '',
-            cpf: buyer?.cpf || '',
+            cpf: normalizedBuyerCpf,
           },
           created_at: checkedOrder.created_at,
+          mercado_pago_id: (checkedOrder as any).mercado_pago_id || null,
+          already_processed: true,
         };
 
-        ordersStore.set(checkedOrder.id, recoveredOrder);
-
-        return res.json({
-          success: true,
-          order: recoveredOrder,
-          payment: {
-            status: 'pending',
-            method: recoveredOrder.payment_method,
-            preference_id: `pref_${checkedOrder.id}`,
-            gateway_ready: isGatewayReady,
-            expires_at: expirationDate,
-            expires_in_seconds: 900,
-            pix_copy_paste: recoveredOrder.payment_method === 'pix'
-              ? `00020126580014BR.GOV.BCB.PIX0136${checkedOrder.id}520400005303986540${recoveredOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
-              : null,
-            message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
-          },
-        });
+        return await finalizeOrderWithRealPixCharge(recoveredOrder);
       }
 
       return res.status(400).json({ error: msg || 'Falha ao processar o checkout.' });
     }
 
     if (rpcResult && rpcResult.order_id) {
+      if (
+        rpcResult.payment_status === 'cancelled' ||
+        rpcResult.payment_status === 'rejected' ||
+        rpcResult.payment_status === 'refunded'
+      ) {
+        return res.status(409).json({
+          error:
+            'Este pedido já foi encerrado/cancelado anteriormente e seu estoque foi liberado. Inicie uma nova tentativa de compra.',
+          code: 'ORDER_ALREADY_TERMINATED',
+          status: rpcResult.payment_status,
+        });
+      }
+
       const newOrder: InMemoryOrder = {
         id: rpcResult.order_id,
         user_id: buyerUserId,
         event_id: rpcResult.event_id,
         event_title: rpcResult.event_title || event_title || 'PX CUSTON',
-        items: rpcResult.items,
-        subtotal: rpcResult.subtotal,
-        convenience_fee: rpcResult.convenience_fee,
-        discount: rpcResult.discount,
-        total: rpcResult.total,
-        payment_method: rpcResult.payment_method,
-        payment_status: 'pending',
+        items: rpcResult.items || [],
+        subtotal: Number(rpcResult.subtotal),
+        convenience_fee: Number(rpcResult.convenience_fee),
+        discount: Number(rpcResult.discount),
+        total: Number(rpcResult.total),
+        payment_method: rpcResult.payment_method || 'pix',
+        payment_status: rpcResult.payment_status || 'pending',
         buyer: {
           id: buyerUserId,
           name: buyer?.name || 'Cliente PX',
           email: buyer?.email || '',
-          cpf: buyer?.cpf || '',
+          cpf: normalizedBuyerCpf,
         },
         created_at: rpcResult.created_at || new Date().toISOString(),
+        mercado_pago_id: rpcResult.mercado_pago_id || null,
+        already_processed: Boolean(rpcResult.already_processed),
       };
 
-      ordersStore.set(rpcResult.order_id, newOrder);
-
-      const mpAccessToken = process.env.MP_ACCESS_TOKEN;
-      const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
-      const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-
-      return res.json({
-        success: true,
-        order: newOrder,
-        payment: {
-          status: 'pending',
-          method: newOrder.payment_method,
-          preference_id: `pref_${rpcResult.order_id}`,
-          gateway_ready: isGatewayReady,
-          expires_at: expirationDate,
-          expires_in_seconds: 900,
-          pix_copy_paste: newOrder.payment_method === 'pix'
-            ? `00020126580014BR.GOV.BCB.PIX0136${rpcResult.order_id}520400005303986540${newOrder.total.toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
-            : null,
-          message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
-        },
-      });
+      return await finalizeOrderWithRealPixCharge(newOrder);
     }
 
     return res.status(500).json({ error: 'Resposta inesperada ao criar pedido.' });
@@ -1534,7 +1845,7 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
     try {
       const { data: maybeOrder } = await supabaseAdmin
         .from('orders')
-        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, created_at, order_items(batch_id, quantity, unit_price, subtotal)')
+        .select('id, user_id, event_id, subtotal, convenience_fee, discount, total, payment_method, payment_status, mercado_pago_id, created_at, order_items(batch_id, quantity, unit_price, subtotal)')
         .eq('id', clientOrderId)
         .maybeSingle();
 
@@ -1552,7 +1863,7 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
           },
           requestedUserId: buyerUserId,
           requestedEventId: event_id,
-          requestedPaymentMethod: payment_method || 'pix',
+          requestedPaymentMethod: 'pix',
           requestedItems: formattedItems,
         });
 
@@ -1562,27 +1873,50 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
           });
         }
 
-        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} confirmado no banco após reconexão.`);
-        const mpAccessToken = process.env.MP_ACCESS_TOKEN;
-        const isGatewayReady = Boolean(mpAccessToken && !mpAccessToken.includes('placeholder'));
-        const expirationDate = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        if (
+          maybeOrder.payment_status === 'cancelled' ||
+          maybeOrder.payment_status === 'rejected' ||
+          maybeOrder.payment_status === 'refunded'
+        ) {
+          return res.status(409).json({
+            error:
+              'Este pedido já foi encerrado/cancelado anteriormente e seu estoque foi liberado. Inicie uma nova tentativa de compra.',
+            code: 'ORDER_ALREADY_TERMINATED',
+            status: maybeOrder.payment_status,
+          });
+        }
 
-        return res.json({
-          success: true,
-          order: maybeOrder,
-          payment: {
-            status: 'pending',
-            method: maybeOrder.payment_method,
-            preference_id: `pref_${maybeOrder.id}`,
-            gateway_ready: isGatewayReady,
-            expires_at: expirationDate,
-            expires_in_seconds: 900,
-            pix_copy_paste: maybeOrder.payment_method === 'pix'
-              ? `00020126580014BR.GOV.BCB.PIX0136${maybeOrder.id}520400005303986540${Number(maybeOrder.total).toFixed(2)}5802BR5916PX CUSTON EVENTOS6009MANHUACU62070503***6304B7A1`
-              : null,
-            message: 'Pedido registrado com sucesso. Aguardando confirmação do pagamento pelo Mercado Pago (Expira em 15 minutos).',
+        console.log(`[PX CUSTON Checkout] Pedido ${clientOrderId} confirmado no banco após reconexão.`);
+        const recoveredFromExceptionOrder: InMemoryOrder = {
+          id: maybeOrder.id,
+          user_id: maybeOrder.user_id,
+          event_id: maybeOrder.event_id,
+          event_title: dbEvent?.title || event_title || 'PX CUSTON',
+          items: ((maybeOrder as any).order_items || []).map((oi: any) => ({
+            batch_id: oi.batch_id,
+            batch_name: 'Ingresso PX',
+            quantity: oi.quantity,
+            unit_price: Number(oi.unit_price),
+            subtotal: Number(oi.subtotal),
+          })),
+          subtotal: Number(maybeOrder.subtotal),
+          convenience_fee: Number(maybeOrder.convenience_fee),
+          discount: Number(maybeOrder.discount),
+          total: Number(maybeOrder.total),
+          payment_method: maybeOrder.payment_method,
+          payment_status: maybeOrder.payment_status,
+          buyer: {
+            id: buyerUserId,
+            name: buyer?.name || 'Cliente PX',
+            email: buyer?.email || '',
+            cpf: normalizedBuyerCpf,
           },
-        });
+          created_at: maybeOrder.created_at,
+          mercado_pago_id: (maybeOrder as any).mercado_pago_id || null,
+          already_processed: true,
+        };
+
+        return await finalizeOrderWithRealPixCharge(recoveredFromExceptionOrder);
       }
     } catch (checkErr) {
       console.error('[PX CUSTON Checkout] Erro ao reconciliar status:', checkErr);
@@ -1592,55 +1926,209 @@ app.post('/api/orders/create', async (req: Request, res: Response) => {
   }
 });
 
-// Endpoint: Consulta de Status do Pedido com Validação Automática de Expiração (15 min)
+// Janela de expiração oficial: 15 minutos de validade do QR Code + 3 minutos de janela de segurança (18 minutos totais)
+const PIX_QR_VALIDITY_MS = 15 * 60 * 1000;
+const PIX_EXPIRATION_SAFETY_GRACE_MS = 3 * 60 * 1000;
+const ORDER_SAFE_EXPIRATION_MS = PIX_QR_VALIDITY_MS + PIX_EXPIRATION_SAFETY_GRACE_MS; // 18 minutos
+
+/**
+ Reconcilia ativamente com o Mercado Pago antes de expirar qualquer pedido pendente.
+ * Garante que:
+ * 1) Um pedido pago nos últimos segundos nunca seja cancelado;
+ * 2) Em caso de timeout/5xx na consulta ao Mercado Pago, o pedido permaneça pendente (sem liberar estoque);
+ * 3) Durante a janela de graça (15 a 18 min), o pedido seja reconciliado sem cancelamento precipitado.
+ */
+async function reconcileAndEvaluatePendingOrderExpiration(params: {
+  orderId: string;
+  userId?: string;
+  total: number;
+  createdAt: string;
+  updatedAt?: string;
+  currentStatus: string;
+  mercadoPagoId?: string | null;
+}): Promise<{
+  statusCode: number;
+  payload: Record<string, any>;
+}> {
+  const { orderId, userId, total, createdAt, updatedAt, currentStatus, mercadoPagoId } = params;
+  const ageMs = Date.now() - new Date(createdAt).getTime();
+
+  // 1. Se o gateway estiver configurado, reconciliar ativamente com a API oficial do Mercado Pago
+  if (isServerAccessTokenConfigured(process.env.MP_ACCESS_TOKEN)) {
+    const reconciliation = await reconcileMercadoPagoPixPaymentByOrder({
+      order: {
+        id: orderId,
+        user_id: userId || '',
+        total: Number(total),
+        mercado_pago_id: mercadoPagoId || null,
+      },
+      mpAccessToken: process.env.MP_ACCESS_TOKEN,
+      supabaseClient: supabaseAdmin,
+    });
+
+    if (reconciliation.outcome === 'found' && reconciliation.payment) {
+      const mpStatus = reconciliation.payment.status;
+
+      if (mpStatus === 'approved') {
+        try {
+          await supabaseAdmin.rpc('confirm_order_and_issue_tickets', {
+            p_order_id: orderId,
+            p_mercado_pago_id: String(reconciliation.payment.id),
+          });
+        } catch (confirmErr) {
+          console.error('[PX CUSTON Status Reconcile] Erro ao confirmar pedido aprovado na reconciliação:', confirmErr);
+        }
+
+        const cached = ordersStore.get(orderId);
+        if (cached) cached.payment_status = 'approved';
+
+        return {
+          statusCode: 200,
+          payload: {
+            id: orderId,
+            status: 'approved',
+            total: Number(total),
+            updated_at: new Date().toISOString(),
+            expired: false,
+            reconciled: true,
+            message: 'Pagamento Pix confirmado via reconciliação ativa com o Mercado Pago.',
+          },
+        };
+      }
+
+      if (mpStatus === 'in_process') {
+        const cached = ordersStore.get(orderId);
+        if (cached) cached.payment_status = 'in_process';
+
+        return {
+          statusCode: 200,
+          payload: {
+            id: orderId,
+            status: 'in_process',
+            total: Number(total),
+            updated_at: new Date().toISOString(),
+            expired: false,
+            reconciliation_pending: true,
+            message: 'Pagamento em análise no Mercado Pago. O estoque permanece preservado.',
+          },
+        };
+      }
+
+      // Se o pagamento no Mercado Pago ainda está pending e estamos dentro da janela de segurança (<= 18 min),
+      // aguardar antes de cancelar
+      if (mpStatus === 'pending' && ageMs <= ORDER_SAFE_EXPIRATION_MS) {
+        return {
+          statusCode: 200,
+          payload: {
+            id: orderId,
+            status: 'pending',
+            total: Number(total),
+            updated_at: updatedAt || createdAt,
+            expired: false,
+            reconciliation_pending: true,
+            message: 'Aguardando janela de segurança de reconciliação do Pix antes de expirar a reserva.',
+          },
+        };
+      }
+    } else if (reconciliation.outcome === 'inconclusive' || reconciliation.outcome === 'mismatch') {
+      // NUNCA cancelar pedido nem liberar estoque quando o estado no Mercado Pago for inconclusivo (timeout/5xx)
+      console.warn(
+        `[PX CUSTON Status Reconcile] ⚠️ Expiração suspensa para o pedido ${orderId} (resultado ${reconciliation.outcome}): ${reconciliation.reason}`
+      );
+      return {
+        statusCode: 200,
+        payload: {
+          id: orderId,
+          status: 'pending',
+          total: Number(total),
+          updated_at: updatedAt || createdAt,
+          expired: false,
+          reconciliation_pending: true,
+          message:
+            'Reconciliação com o Mercado Pago em andamento. O pedido e o estoque permanecem protegidos.',
+        },
+      };
+    }
+  }
+
+  // 2. Respeitar a janela de segurança de 18 minutos (15 min QR + 3 min margem) antes de cancelar definitivamente
+  if (ageMs <= ORDER_SAFE_EXPIRATION_MS) {
+    return {
+      statusCode: 200,
+      payload: {
+        id: orderId,
+        status: 'pending',
+        total: Number(total),
+        updated_at: updatedAt || createdAt,
+        expired: false,
+        reconciliation_pending: true,
+        message: 'Pedido em janela de segurança de reconciliação pós-expiração do QR Code.',
+      },
+    };
+  }
+
+  // 3. Passada a janela de segurança e confirmado que não há pagamento aprovado/em processamento:
+  // Cancelar e liberar estoque exclusivamente via RPC transacional
+  let cancelResult: any = null;
+  let cancelErr: any = null;
+  try {
+    const rpcRes = await supabaseAdmin.rpc('cancel_order_and_release_stock', {
+      p_order_id: orderId,
+      p_reason: 'expired_timeout',
+    });
+    cancelResult = rpcRes.data;
+    cancelErr = rpcRes.error;
+  } catch (rpcException: any) {
+    cancelErr = { message: rpcException?.message || 'Exceção ao executar RPC de cancelamento' };
+  }
+
+  const evaluation = evaluateOrderCancellationOutcome({
+    rpcResult: cancelResult,
+    rpcError: cancelErr,
+    orderId,
+    currentStatus,
+    total: Number(total),
+    updatedAt: updatedAt || createdAt,
+  });
+
+  const cached = ordersStore.get(orderId);
+  if (evaluation.cancelled) {
+    if (cached) cached.payment_status = 'cancelled';
+  } else if (evaluation.outcome === 'already_approved') {
+    if (cached) cached.payment_status = 'approved';
+  }
+
+  return {
+    statusCode: evaluation.statusCode,
+    payload: evaluation.payload,
+  };
+}
+
+// Endpoint: Consulta de Status do Pedido com Reconciliação Ativa e Janela de Segurança (15 min QR + 3 min graça)
 app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
     const { data: dbOrder } = await supabaseAdmin
       .from('orders')
-      .select('id, payment_status, total, created_at, updated_at')
+      .select('id, user_id, payment_status, total, mercado_pago_id, created_at, updated_at')
       .eq('id', id)
       .maybeSingle();
 
     if (dbOrder) {
-      // Verificar se o pedido é pendente e excedeu o tempo limite de 15 minutos
       if (dbOrder.payment_status === 'pending') {
         const ageMs = Date.now() - new Date(dbOrder.created_at).getTime();
-        if (ageMs > 15 * 60 * 1000) {
-          // Cancelar e liberar estoque exclusivamente via RPC transacional (SEM fallback direto na tabela orders)
-          let cancelResult: any = null;
-          let cancelErr: any = null;
-          try {
-            const rpcRes = await supabaseAdmin.rpc('cancel_order_and_release_stock', {
-              p_order_id: id,
-              p_reason: 'expired_timeout',
-            });
-            cancelResult = rpcRes.data;
-            cancelErr = rpcRes.error;
-          } catch (rpcException: any) {
-            cancelErr = { message: rpcException?.message || 'Exceção ao executar RPC de cancelamento' };
-          }
-
-          const evaluation = evaluateOrderCancellationOutcome({
-            rpcResult: cancelResult,
-            rpcError: cancelErr,
+        if (ageMs > PIX_QR_VALIDITY_MS) {
+          const reconciled = await reconcileAndEvaluatePendingOrderExpiration({
             orderId: dbOrder.id,
-            currentStatus: dbOrder.payment_status,
-            total: dbOrder.total,
+            userId: (dbOrder as any).user_id,
+            total: Number(dbOrder.total),
+            createdAt: dbOrder.created_at,
             updatedAt: dbOrder.updated_at,
+            currentStatus: dbOrder.payment_status,
+            mercadoPagoId: (dbOrder as any).mercado_pago_id || null,
           });
-
-          const cached = ordersStore.get(id);
-          if (evaluation.cancelled) {
-            dbOrder.payment_status = 'cancelled';
-            if (cached) cached.payment_status = 'cancelled';
-          } else if (evaluation.outcome === 'already_approved') {
-            dbOrder.payment_status = 'approved';
-            if (cached) cached.payment_status = 'approved';
-          }
-
-          return res.status(evaluation.statusCode).json(evaluation.payload);
+          return res.status(reconciled.statusCode).json(reconciled.payload);
         }
       }
 
@@ -1659,37 +2147,17 @@ app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
   if (order) {
     if (order.payment_status === 'pending') {
       const ageMs = Date.now() - new Date(order.created_at).getTime();
-      if (ageMs > 15 * 60 * 1000) {
-        // Mesmo para pedido em cache, exigir confirmação da RPC transacional antes de declarar cancelamento ou liberação de estoque
-        let cancelResult: any = null;
-        let cancelErr: any = null;
-        try {
-          const rpcRes = await supabaseAdmin.rpc('cancel_order_and_release_stock', {
-            p_order_id: id,
-            p_reason: 'expired_timeout',
-          });
-          cancelResult = rpcRes.data;
-          cancelErr = rpcRes.error;
-        } catch (rpcException: any) {
-          cancelErr = { message: rpcException?.message || 'Exceção ao executar RPC de cancelamento' };
-        }
-
-        const evaluation = evaluateOrderCancellationOutcome({
-          rpcResult: cancelResult,
-          rpcError: cancelErr,
+      if (ageMs > PIX_QR_VALIDITY_MS) {
+        const reconciled = await reconcileAndEvaluatePendingOrderExpiration({
           orderId: order.id,
-          currentStatus: order.payment_status,
-          total: order.total,
+          userId: order.user_id,
+          total: Number(order.total),
+          createdAt: order.created_at,
           updatedAt: order.created_at,
+          currentStatus: order.payment_status,
+          mercadoPagoId: order.mercado_pago_id || null,
         });
-
-        if (evaluation.cancelled) {
-          order.payment_status = 'cancelled';
-        } else if (evaluation.outcome === 'already_approved') {
-          order.payment_status = 'approved';
-        }
-
-        return res.status(evaluation.statusCode).json(evaluation.payload);
+        return res.status(reconciled.statusCode).json(reconciled.payload);
       }
     }
 
@@ -1710,49 +2178,12 @@ app.get('/api/orders/:id/status', async (req: Request, res: Response) => {
  * Documentação oficial: https://www.mercadopago.com.br/developers/pt/docs/your-integrations/notifications/webhooks
  */
 function verifyMercadoPagoSignature(req: Request): { valid: boolean; configured: boolean; reason?: string } {
-  const secret = process.env.MP_WEBHOOK_SECRET;
-  if (!secret || secret.includes('your-webhook-secret') || secret.includes('placeholder')) {
-    return { valid: false, configured: false, reason: 'MP_WEBHOOK_SECRET não configurado no ambiente.' };
-  }
-
-  const xSignature = req.headers['x-signature'] as string;
-  const xRequestId = req.headers['x-request-id'] as string;
-
-  if (!xSignature) {
-    return { valid: false, configured: true, reason: 'Cabeçalho x-signature ausente na requisição.' };
-  }
-
-  // Extrair partes: ts e v1 (ex: "ts=1704067200,v1=abcdef...")
-  const parts: Record<string, string> = {};
-  for (const part of xSignature.split(',')) {
-    const [key, val] = part.trim().split('=');
-    if (key && val) parts[key] = val;
-  }
-
-  const ts = parts['ts'];
-  const v1 = parts['v1'];
-
-  if (!ts || !v1) {
-    return { valid: false, configured: true, reason: 'Formato inválido de x-signature (ts ou v1 ausentes).' };
-  }
-
-  // Prevenir replay attacks com timestamp superior a 10 minutos
-  const nowSec = Math.floor(Date.now() / 1000);
-  const tsNum = parseInt(ts, 10);
-  if (!isNaN(tsNum) && Math.abs(nowSec - tsNum) > 600) {
-    return { valid: false, configured: true, reason: 'Timestamp de assinatura expirado (replay attack detectado).' };
-  }
-
-  const dataId = req.query['data.id'] || req.body?.data?.id || req.body?.id || '';
-  const manifest = `id:${dataId};request-id:${xRequestId || ''};ts:${ts};`;
-
-  try {
-    const computedHash = crypto.createHmac('sha256', secret).update(manifest).digest('hex');
-    const isValid = crypto.timingSafeEqual(Buffer.from(computedHash, 'utf-8'), Buffer.from(v1, 'utf-8'));
-    return { valid: isValid, configured: true };
-  } catch (err) {
-    return { valid: false, configured: true, reason: 'Falha no cálculo HMAC.' };
-  }
+  return verifyMercadoPagoWebhookSignature({
+    headers: req.headers as Record<string, string | string[] | undefined>,
+    query: req.query as Record<string, any>,
+    body: req.body as Record<string, any>,
+    webhookSecret: process.env.MP_WEBHOOK_SECRET,
+  });
 }
 
 // Webhook Oficial do Mercado Pago para Confirmação e Conciliação de Pagamentos
@@ -1760,11 +2191,25 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
   const body = req.body || {};
   const query = req.query || {};
 
-  // 1. Verificação de Autenticidade da Assinatura (se configurada no ambiente)
-  const signatureCheck = verifyMercadoPagoSignature(req);
-  if (signatureCheck.configured && !signatureCheck.valid) {
-    console.error(`[PX CUSTON Webhook] ❌ Assinatura inválida rejeitada: ${signatureCheck.reason}`);
-    return res.status(401).json({ error: 'Assinatura inválida.', reason: signatureCheck.reason });
+  // 1. Verificação Estrita de Autenticidade da Assinatura:
+  // Em produção, MP_WEBHOOK_SECRET é obrigatório (fail-closed HTTP 503 se ausente; HTTP 401 se inválido).
+  const webhookGate = evaluateWebhookSecurityGate({
+    headers: req.headers as Record<string, string | string[] | undefined>,
+    query,
+    body,
+    webhookSecret: process.env.MP_WEBHOOK_SECRET,
+    isProduction: isProductionEnvironment(),
+  });
+
+  if (!webhookGate.allowed) {
+    console.error(
+      `[PX CUSTON Webhook] ❌ Bloqueio de segurança (${webhookGate.code}): ${webhookGate.reason || webhookGate.error}`
+    );
+    return res.status(webhookGate.statusCode).json({
+      error: webhookGate.error,
+      reason: webhookGate.reason,
+      code: webhookGate.code,
+    });
   }
 
   // 2. Extração do Identificador do Pagamento
@@ -1786,13 +2231,14 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'Gateway de pagamento não configurado no servidor.' });
   }
 
-  // 4. Consulta Autorizada e Exclusiva na API Oficial do Mercado Pago (Backend-to-Backend)
+  // 4. Consulta Autorizada e Exclusiva na API Oficial do Mercado Pago (Backend-to-Backend com timeout explícito)
   let mpData: any = null;
   try {
-    const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+    const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(String(paymentId))}`, {
       headers: {
         Authorization: `Bearer ${mpAccessToken}`,
       },
+      signal: createMpTimeoutSignal(),
     });
 
     if (!mpResponse.ok) {
@@ -1802,13 +2248,13 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
 
     mpData = await mpResponse.json();
   } catch (mpErr: any) {
-    console.error('[PX CUSTON Webhook] Exceção de rede ao consultar API oficial do Mercado Pago:', mpErr);
+    console.error('[PX CUSTON Webhook] Exceção de rede ou timeout ao consultar API oficial do Mercado Pago:', mpErr);
     return res.status(502).json({ error: 'Erro de comunicação com o Mercado Pago.' });
   }
 
   // 5. Validação Estrita dos Dados Autorizados do Gateway
   // NUNCA confiar no body recebido: usar estritamente os dados retornados pela API oficial
-  const officialOrderId = mpData.external_reference;
+  const officialOrderId = typeof mpData.external_reference === 'string' ? mpData.external_reference.trim() : '';
   const officialStatus = mpData.status; // 'approved', 'rejected', 'cancelled', 'in_process', etc.
   const officialCurrency = mpData.currency_id;
   const officialAmount = Number(mpData.transaction_amount || 0);
@@ -1821,7 +2267,7 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
   // 6. Consultar Pedido no PostgreSQL
   const { data: dbOrder, error: orderFetchErr } = await supabaseAdmin
     .from('orders')
-    .select('id, total, payment_status, event_id, user_id')
+    .select('id, total, payment_status, payment_method, event_id, user_id')
     .eq('id', officialOrderId)
     .maybeSingle();
 
@@ -1841,6 +2287,54 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Divergência entre o valor pago e o valor oficial do pedido.' });
   }
 
+  // Auxiliar para sincronizar public.payments com verificação explícita de erro (sem catch silencioso)
+  const syncWebhookPaymentRecord = async (normalizedStatus: 'approved' | 'rejected' | 'cancelled' | 'in_process') => {
+    try {
+      const { data: updatedRows, error: updateErr } = await supabaseAdmin
+        .from('payments')
+        .update({
+          status: normalizedStatus,
+          external_reference: String(paymentId),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('order_id', officialOrderId)
+        .select('id');
+
+      if (updateErr) {
+        console.error(
+          `[PX CUSTON Webhook] Erro ao atualizar public.payments para o pedido ${officialOrderId}:`,
+          updateErr.message || updateErr
+        );
+      } else if (!updatedRows || (Array.isArray(updatedRows) && updatedRows.length === 0)) {
+        // Caso o registro em public.payments ainda não existisse (ex: falha transitória na criação), persistir agora
+        const persistRes = await persistMercadoPagoPixChargeLink({
+          supabaseClient: supabaseAdmin,
+          order: {
+            id: officialOrderId,
+            user_id: dbOrder.user_id,
+            total: Number(dbOrder.total),
+          },
+          mpPaymentId: String(paymentId),
+          status: normalizedStatus,
+          pixCopyPaste: mpData?.point_of_interaction?.transaction_data?.qr_code || null,
+          pixQrCodeBase64: mpData?.point_of_interaction?.transaction_data?.qr_code_base64 || null,
+          ticketUrl: mpData?.point_of_interaction?.transaction_data?.ticket_url || null,
+          expiresAt: mpData?.date_of_expiration || new Date().toISOString(),
+        });
+        if (!persistRes.ok) {
+          console.error(
+            `[PX CUSTON Webhook] Falha ao recuperar vínculo em public.payments para pedido ${officialOrderId}: ${persistRes.error}`
+          );
+        }
+      }
+    } catch (paySyncErr: any) {
+      console.error(
+        `[PX CUSTON Webhook] Exceção ao sincronizar public.payments para o pedido ${officialOrderId}:`,
+        paySyncErr?.message || paySyncErr
+      );
+    }
+  };
+
   // 8. Proteção contra Notificações Fora de Ordem e Atrasadas
   // Se o pedido JÁ está aprovado, NUNCA cancelar ou estornar por notificação atrasada
   if (dbOrder.payment_status === 'approved') {
@@ -1850,6 +2344,8 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         p_order_id: officialOrderId,
         p_mercado_pago_id: String(paymentId),
       });
+
+      await syncWebhookPaymentRecord('approved');
 
       // Garantir envio idempotente do e-mail (ignora se já enviado; retenta se tentativa anterior falhou)
       const repeatEmailResult = await sendOrderConfirmationEmailIfNeeded({
@@ -1903,6 +2399,8 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
       console.error('[PX CUSTON Webhook] Falha ao confirmar pedido via RPC:', errReason);
       return res.status(500).json({ error: 'Falha ao processar confirmação de pagamento no banco.' });
     }
+
+    await syncWebhookPaymentRecord('approved');
 
     const cached = ordersStore.get(officialOrderId);
     if (cached) cached.payment_status = 'approved';
@@ -1979,6 +2477,8 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
       });
     }
 
+    await syncWebhookPaymentRecord(officialStatus === 'rejected' ? 'rejected' : 'cancelled');
+
     const cached = ordersStore.get(officialOrderId);
     if (cached) cached.payment_status = 'cancelled';
 
@@ -1997,10 +2497,19 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
 
   if (officialStatus === 'in_process') {
     // Antifraude em análise: atualizar pedido para in_process (nunca expirar)
-    await supabaseAdmin
+    const { error: orderInProcessErr } = await supabaseAdmin
       .from('orders')
       .update({ payment_status: 'in_process', updated_at: new Date().toISOString() })
       .eq('id', officialOrderId);
+
+    if (orderInProcessErr) {
+      console.error(
+        `[PX CUSTON Webhook] Erro ao atualizar pedido ${officialOrderId} para in_process:`,
+        orderInProcessErr.message || orderInProcessErr
+      );
+    }
+
+    await syncWebhookPaymentRecord('in_process');
 
     const cached = ordersStore.get(officialOrderId);
     if (cached) cached.payment_status = 'in_process';
@@ -2011,17 +2520,88 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
   return res.status(200).json({ received: true, order_id: officialOrderId, status: officialStatus });
 });
 
-// Admin Route: Gatilho manual para expirar pedidos pendentes no PX CONTROL
+// Helper compartilhado para expirar em lote pedidos pendentes após reconciliação ativa com o Mercado Pago
+async function reconcileAndExpirePendingOrdersBatch(requestedTimeoutMinutes = 18) {
+  // Garante no mínimo 18 minutos (15 min validade QR + 3 min janela de segurança)
+  const effectiveTimeoutMinutes = Math.max(18, requestedTimeoutMinutes);
+  const cutoffIso = new Date(Date.now() - effectiveTimeoutMinutes * 60 * 1000).toISOString();
+
+  let reconciledApprovedCount = 0;
+  let skippedInconclusiveCount = 0;
+  let expiredOrdersCount = 0;
+
+  try {
+    const { data: candidates, error: listErr } = await supabaseAdmin
+      .from('orders')
+      .select('id, user_id, total, payment_status, mercado_pago_id, created_at, updated_at')
+      .eq('payment_status', 'pending')
+      .lt('created_at', cutoffIso)
+      .limit(50);
+
+    if (!listErr && Array.isArray(candidates) && candidates.length > 0) {
+      for (const candidate of candidates) {
+        const resEval = await reconcileAndEvaluatePendingOrderExpiration({
+          orderId: candidate.id,
+          userId: (candidate as any).user_id,
+          total: Number(candidate.total),
+          createdAt: candidate.created_at,
+          updatedAt: candidate.updated_at,
+          currentStatus: candidate.payment_status,
+          mercadoPagoId: (candidate as any).mercado_pago_id || null,
+        });
+
+        if (resEval.payload?.status === 'approved') {
+          reconciledApprovedCount++;
+        } else if (resEval.payload?.reconciliation_pending) {
+          skippedInconclusiveCount++;
+        } else if (resEval.payload?.status === 'cancelled') {
+          expiredOrdersCount++;
+        }
+      }
+
+      return {
+        data: {
+          success: true,
+          effective_timeout_minutes: effectiveTimeoutMinutes,
+          expired_orders_count: expiredOrdersCount,
+          reconciled_approved_count: reconciledApprovedCount,
+          skipped_inconclusive_count: skippedInconclusiveCount,
+        },
+        error: null,
+      };
+    }
+  } catch (batchErr: any) {
+    console.warn('[PX CUSTON Expiration] Falha ao listar candidatos para reconciliação individual:', batchErr?.message || batchErr);
+  }
+
+  // Fallback para a RPC apenas quando não houver gateway configurado (ambiente offline)
+  if (!isServerAccessTokenConfigured(process.env.MP_ACCESS_TOKEN)) {
+    return await supabaseAdmin.rpc('expire_pending_orders', {
+      p_timeout_minutes: effectiveTimeoutMinutes,
+    });
+  }
+
+  return {
+    data: {
+      success: true,
+      effective_timeout_minutes: effectiveTimeoutMinutes,
+      expired_orders_count: expiredOrdersCount,
+      reconciled_approved_count: reconciledApprovedCount,
+      skipped_inconclusive_count: skippedInconclusiveCount,
+    },
+    error: null,
+  };
+}
+
+// Admin Route: Gatilho manual para expirar pedidos pendentes no PX CONTROL (com reconciliação prévia)
 app.post(
   '/api/admin/orders/expire-pending',
   requireAuth,
   requireRole(['ADMIN', 'SUPER_ADMIN']),
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const timeoutMinutes = parseInt(req.body.timeout_minutes, 10) || 15;
-      const { data, error } = await supabaseAdmin.rpc('expire_pending_orders', {
-        p_timeout_minutes: timeoutMinutes,
-      });
+      const timeoutMinutes = parseInt(req.body?.timeout_minutes, 10) || 18;
+      const { data, error } = await reconcileAndExpirePendingOrdersBatch(timeoutMinutes);
 
       if (error) {
         return res.status(500).json({ error: error.message });
@@ -2039,38 +2619,24 @@ app.post(
   }
 );
 
-// Legado compatível: Payment preference
+// Endpoint legado desativado: não emite preference_id sintético sem pedido oficial no banco
 app.post('/api/payments/create-preference', (req: Request, res: Response) => {
-  const preferenceId = `pref_${Date.now()}_px`;
-  res.json({
-    success: true,
-    preference_id: preferenceId,
-    status: 'pending',
+  return res.status(410).json({
+    success: false,
+    error: 'Geração de preference_id sintético desativada. Utilize POST /api/orders/create para geração oficial de cobrança Pix vinculada ao pedido.',
+    code: 'SYNTHETIC_PREFERENCE_DISABLED',
   });
 });
 
-// Rotina em segundo plano de expiração de pedidos pendentes (> 15 minutos)
+// Rotina em segundo plano de expiração de pedidos pendentes (> 18 minutos com reconciliação ativa)
 function setupOrderExpirationWorker() {
   const EXPIRATION_INTERVAL_MS = 2 * 60 * 1000; // a cada 2 minutos
   setInterval(async () => {
     try {
-      const { data: expRes, error: expErr } = await supabaseAdmin.rpc('expire_pending_orders', {
-        p_timeout_minutes: 15,
-      });
+      const { data: expRes, error: expErr } = await reconcileAndExpirePendingOrdersBatch(18);
 
       if (!expErr && expRes && expRes.expired_orders_count > 0) {
         console.log(`[PX CUSTON Worker] Rotina de expiração executada: ${expRes.expired_orders_count} pedidos cancelados e estoque liberado.`);
-      }
-
-      // Sincronizar cache em memória
-      const now = Date.now();
-      for (const [id, ord] of ordersStore.entries()) {
-        if (ord.payment_status === 'pending') {
-          const ageMs = now - new Date(ord.created_at).getTime();
-          if (ageMs > 15 * 60 * 1000) {
-            ord.payment_status = 'cancelled';
-          }
-        }
       }
     } catch (e) {
       // Silencioso em caso de contingência

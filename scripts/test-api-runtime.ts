@@ -10,10 +10,21 @@
  */
 
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 import {
   executeAuthenticatedTicketValidation,
   evaluateOrderCancellationOutcome,
 } from '../src/lib/ticketValidator';
+import {
+  executeAuthenticatedPaymentSettingsUpdate,
+  readPersistedPaymentSettings,
+  inspectPersistedPaymentSettings,
+  resolveAuthoritativePaymentSettings,
+  evaluateCheckoutPaymentMethodGate,
+  buildCanonicalPaymentConfigResponse,
+} from '../src/lib/paymentSettingsValidator';
+import { generateDeterministicTestCpf } from '../src/lib/mercadoPagoGateway';
 
 export interface ApiTestResult {
   id: number;
@@ -519,7 +530,7 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
     }, {
       event_id: '00000000-0000-0000-0000-000000000000',
       items: [{ batch_id: 'batch-test-1', quantity: 1, unit_price: 50.0 }],
-      buyer: { name: 'Comprador Fallback', email: 'fallback@px.com' },
+      buyer: { name: 'Comprador Fallback', email: 'fallback@px.com', cpf: generateDeterministicTestCpf(16) },
       payment_method: 'pix',
     }),
     (data) => Boolean(data && data.error && (data.error.includes('integridade') || data.error.includes('manutenção') || data.error.includes('indisponível') || data.code === 'RPC_NOT_AVAILABLE'))
@@ -677,6 +688,389 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   );
 
   // --------------------------------------------------------------------------
+  // Cenário 22: Leitura de /api/payments/config retorna dados públicos canônicos sem expor secrets (HTTP 200)
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    22,
+    'Leitura segura de /api/payments/config sem exposição de segredos (HTTP 200)',
+    200,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/payments/config',
+      method: 'GET',
+    }),
+    (data) =>
+      Boolean(
+        data &&
+          typeof data.configured === 'boolean' &&
+          (data.environment === 'sandbox' || data.environment === 'production') &&
+          typeof data.pix_enabled === 'boolean' &&
+          typeof data.credit_card_enabled === 'boolean' &&
+          typeof data.boleto_enabled === 'boolean' &&
+          data.access_token === undefined &&
+          data.webhook_secret === undefined
+      )
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 23: Proteção RBAC em PUT /api/admin/payments/config sem token retorna 401
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    23,
+    'Proteção RBAC em PUT /api/admin/payments/config sem token (HTTP 401)',
+    401,
+    () => requester({
+      hostname: 'localhost',
+      port: 3000,
+      path: '/api/admin/payments/config',
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+    }, {
+      environment: 'production',
+      public_key: 'APP_USR-12345678-abcd',
+      pix_enabled: true,
+      credit_card_enabled: true,
+      boleto_enabled: false,
+    }),
+    (data) => Boolean(data && data.error)
+  );
+
+  // --------------------------------------------------------------------------
+  // Cenário 24: Persistência real de configurações Mercado Pago (RBAC 403/200, Validação 400 e Reload)
+  // --------------------------------------------------------------------------
+  await executeScenario(
+    24,
+    'Persistência real de configurações Mercado Pago: bloqueia USER/OPERATOR (403), rejeita payload inválido/secrets (400) e persiste ADMIN (200)',
+    200,
+    async () => {
+      if (customRequester) {
+        return requester({
+          hostname: 'localhost',
+          port: 3000,
+          path: '/api/admin/payments/config',
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer valid_admin_token',
+          },
+        }, {
+          environment: 'production',
+          public_key: 'APP_USR-99887766-abcd-1234',
+          pix_enabled: true,
+          credit_card_enabled: false,
+          boleto_enabled: false,
+        });
+      }
+
+      const tempFile = path.resolve(process.cwd(), 'data', `payment-settings.runtime-test.${process.pid}.json`);
+      const auditInserted: any[] = [];
+
+      const makeMockSupabase = (role: string, userId: string) => ({
+        auth: {
+          getUser: async () => ({ data: { user: { id: userId } }, error: null }),
+        },
+        from: (table: string) => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({ data: { id: userId, role }, error: null }),
+            }),
+          }),
+          insert: async (row: any) => {
+            if (table === 'audit_logs') auditInserted.push(row);
+            return { error: null };
+          },
+        }),
+      });
+
+      try {
+        // 1) USER comum bloqueado com 403
+        const userForbidden = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer user_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('USER', 'user-1'),
+          filePath: tempFile,
+        });
+
+        // 2) CHECKIN_OPERATOR bloqueado com 403
+        const operatorForbidden = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer operator_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('CHECKIN_OPERATOR', 'op-1'),
+          filePath: tempFile,
+        });
+
+        // 3) Payload inválido (todos os métodos desmarcados) -> 400
+        const invalidNoMethods = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            pix_enabled: false,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-1'),
+          filePath: tempFile,
+        });
+
+        // 3b) Tentativa de habilitar cartão ou boleto -> 400 (PAYMENT_METHOD_NOT_IMPLEMENTED)
+        const rejectUnimplementedCard = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            pix_enabled: true,
+            credit_card_enabled: true,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-1'),
+          filePath: tempFile,
+        });
+
+        // 4) Tentativa de enviar access_token secreto no payload -> 400
+        const invalidSecretInPayload = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            access_token: 'APP_USR-SECRET-PRIVATE-TOKEN',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-1'),
+          filePath: tempFile,
+        });
+
+        // 5) ADMIN salva configuração válida -> 200 e grava em disco + audit_logs
+        const validAdminSave = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'production',
+            public_key: 'APP_USR-99887766-abcd-1234',
+            pix_enabled: true,
+            pix_instant_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-verified-uuid'),
+          filePath: tempFile,
+          env: { NODE_ENV: 'development', MP_ACCESS_TOKEN: '' } as any,
+        });
+
+        // 6) Reload a partir do disco comprova persistência real e avaliação de effective_environment
+        const reloaded = readPersistedPaymentSettings(tempFile, { NODE_ENV: 'development' } as any);
+        const canonicalReloaded = buildCanonicalPaymentConfigResponse(reloaded, {
+          NODE_ENV: 'development',
+          MP_ACCESS_TOKEN: '',
+        } as any);
+
+        // 7) Token vazio ('Bearer   ') retorna 401 (e nunca 411)
+        const emptyBearer = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer   ',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-12345678-abcd',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-verified-uuid'),
+          filePath: tempFile,
+        });
+
+        // 8) Falha em audit_logs reverte o arquivo para o estado anterior e retorna 503 (AUDIT_LOG_FAILED)
+        const failingAuditSave = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-00001111-2222-3333',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: {
+            auth: {
+              getUser: async () => ({ data: { user: { id: 'admin-verified-uuid' } }, error: null }),
+            },
+            from: () => ({
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({ data: { id: 'admin-verified-uuid', role: 'ADMIN' }, error: null }),
+                }),
+              }),
+              insert: async () => ({ error: { message: 'Audit DB unreachable' } }),
+            }),
+          },
+          filePath: tempFile,
+          env: { NODE_ENV: 'development', MP_ACCESS_TOKEN: '' } as any,
+        });
+
+        const reloadedAfterRollback = readPersistedPaymentSettings(tempFile, {
+          NODE_ENV: 'development',
+        } as any);
+
+        // 9) Falha simultânea em audit_logs e no rollback retorna 500 (AUDIT_LOG_AND_ROLLBACK_FAILED, rolledBack=false)
+        const failingAuditAndRollbackSave = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'sandbox',
+            public_key: 'TEST-00001111-2222-3333',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: {
+            auth: {
+              getUser: async () => ({ data: { user: { id: 'admin-verified-uuid' } }, error: null }),
+            },
+            from: () => ({
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({ data: { id: 'admin-verified-uuid', role: 'ADMIN' }, error: null }),
+                }),
+              }),
+              insert: async () => ({ error: { message: 'Audit DB unreachable' } }),
+            }),
+          },
+          filePath: tempFile,
+          env: { NODE_ENV: 'development', MP_ACCESS_TOKEN: '' } as any,
+          rollbackOverride: () => {
+            throw new Error('Simulated rollback write failure');
+          },
+        });
+
+        // 10) Arquivo corrompido dispara bloqueio fail-closed (503) sem retornar defaults
+        fs.writeFileSync(tempFile, '{corrupted_json', 'utf-8');
+        const corruptedState = inspectPersistedPaymentSettings(tempFile, {
+          NODE_ENV: 'development',
+        } as any);
+
+        // 11) Administrador repara o arquivo corrompido via PUT/POST /api/admin/payments/config (200)
+        const adminRepairSave = await executeAuthenticatedPaymentSettingsUpdate({
+          authHeader: 'Bearer admin_token',
+          payload: {
+            environment: 'production',
+            public_key: 'APP_USR-99887766-abcd-1234',
+            pix_enabled: true,
+            pix_instant_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+          supabaseClient: makeMockSupabase('ADMIN', 'admin-verified-uuid'),
+          filePath: tempFile,
+          env: { NODE_ENV: 'development', MP_ACCESS_TOKEN: '' } as any,
+        });
+
+        // 12) Simular novo deploy na Hostinger (arquivo local apagado) e recuperar estado a partir de public.audit_logs
+        fs.unlinkSync(tempFile);
+        const mockDurableQueryClient = {
+          from: () => ({
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    order: () => ({
+                      limit: async () => ({
+                        data: [auditInserted[auditInserted.length - 1]],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+
+        const rehydratedAfterDeploy = await resolveAuthoritativePaymentSettings({
+          filePath: tempFile,
+          supabaseClient: mockDurableQueryClient,
+          env: { NODE_ENV: 'production', MP_ACCESS_TOKEN: 'APP_USR-PROD-SECRET' } as any,
+          requireDurableSync: true,
+        });
+
+        const disabledMethodBlocked = await evaluateCheckoutPaymentMethodGate({
+          paymentMethod: 'credit_card',
+          filePath: tempFile,
+          supabaseClient: mockDurableQueryClient,
+          env: { NODE_ENV: 'production', MP_ACCESS_TOKEN: 'APP_USR-PROD-SECRET' } as any,
+          requireDurableSync: true,
+        });
+
+        const allOk =
+          userForbidden.statusCode === 403 &&
+          operatorForbidden.statusCode === 403 &&
+          invalidNoMethods.statusCode === 400 &&
+          rejectUnimplementedCard.statusCode === 400 &&
+          rejectUnimplementedCard.payload.code === 'PAYMENT_METHOD_NOT_IMPLEMENTED' &&
+          invalidSecretInPayload.statusCode === 400 &&
+          validAdminSave.statusCode === 200 &&
+          validAdminSave.payload.success === true &&
+          canonicalReloaded.environment === 'production' &&
+          canonicalReloaded.effective_environment === 'sandbox' &&
+          Boolean(canonicalReloaded.environment_warning) &&
+          canonicalReloaded.public_key === 'APP_USR-99887766-abcd-1234' &&
+          canonicalReloaded.pix_enabled === true &&
+          canonicalReloaded.credit_card_enabled === false &&
+          canonicalReloaded.boleto_enabled === false &&
+          (canonicalReloaded as any).access_token === undefined &&
+          (canonicalReloaded as any).webhook_secret === undefined &&
+          auditInserted.length === 2 &&
+          auditInserted[0].action === 'UPDATE_PAYMENT_SETTINGS' &&
+          auditInserted[0].actor_id === 'admin-verified-uuid' &&
+          emptyBearer.statusCode === 401 &&
+          failingAuditSave.statusCode === 503 &&
+          failingAuditSave.payload.rolledBack === true &&
+          failingAuditSave.payload.code === 'AUDIT_LOG_FAILED' &&
+          reloadedAfterRollback.public_key === 'APP_USR-99887766-abcd-1234' &&
+          reloadedAfterRollback.pix_enabled === true &&
+          reloadedAfterRollback.credit_card_enabled === false &&
+          reloadedAfterRollback.boleto_enabled === false &&
+          failingAuditAndRollbackSave.statusCode === 500 &&
+          failingAuditAndRollbackSave.payload.rolledBack === false &&
+          failingAuditAndRollbackSave.payload.code === 'AUDIT_LOG_AND_ROLLBACK_FAILED' &&
+          !String(failingAuditAndRollbackSave.payload.error || '').includes('foi revertida') &&
+          corruptedState.ok === false &&
+          corruptedState.statusCode === 503 &&
+          corruptedState.settings === null &&
+          adminRepairSave.statusCode === 200 &&
+          adminRepairSave.payload.success === true &&
+          rehydratedAfterDeploy.ok === true &&
+          rehydratedAfterDeploy.source === 'supabase_audit_rehydrated' &&
+          rehydratedAfterDeploy.settings?.credit_card_enabled === false &&
+          rehydratedAfterDeploy.settings?.boleto_enabled === false &&
+          disabledMethodBlocked.allowed === false &&
+          disabledMethodBlocked.statusCode === 400 &&
+          disabledMethodBlocked.code === 'PAYMENT_METHOD_DISABLED';
+
+        return {
+          statusCode: allOk ? 200 : 500,
+          data: validAdminSave.payload,
+        };
+      } finally {
+        try {
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        } catch {}
+      }
+    },
+    (data) => Boolean(data && data.success === true && data.config)
+  );
+
+  // --------------------------------------------------------------------------
   // Teardown: Limpeza final de estado via rota administrativa autorizada
   // --------------------------------------------------------------------------
   try {
@@ -708,7 +1102,7 @@ export async function runRuntimeTests(customRequester?: RequesterFn): Promise<Ru
   // --------------------------------------------------------------------------
   // Avaliação Final do Gate
   // --------------------------------------------------------------------------
-  const totalScenarios = 21;
+  const totalScenarios = 24;
   const allPassed = failedCount === 0 && passedCount === totalScenarios;
   console.log('\n==============================================================================');
   if (allPassed) {

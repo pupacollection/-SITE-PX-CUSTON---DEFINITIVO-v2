@@ -1,0 +1,6 @@
+{
+  "summary":  "Plano de implementacao para persistencia duravel das configuracoes do Mercado Pago via Supabase audit_logs com cache local sincronizado, comportamento fail-closed HTTP 503 em indisponibilidade ou corrupcao, resolucao de caminho deterministica, protecao no Git, limpeza do erro de leitura no painel administrativo apos salvamento e cobertura completa de testes automatizados.",
+  "updatedAt":  "2026-10-24T02:33:30.780313024Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

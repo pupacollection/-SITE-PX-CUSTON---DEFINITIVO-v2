@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 server.js
+data/payment-settings*.json
+data/*.tmp*
+data/*.rollback*

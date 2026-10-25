@@ -17,6 +17,11 @@ import {
 } from '../src/lib/ticketValidator';
 import { evaluateUserRoleChangePolicy, mergeAuthUserMetadata } from '../src/lib/userRoleValidator';
 import { runOrderConfirmationEmailTests } from './test-order-confirmation-email';
+import {
+  validatePaymentSettingsPayload,
+  buildCanonicalPaymentConfigResponse,
+  isPaymentMethodAllowedByConfig,
+} from '../src/lib/paymentSettingsValidator';
 
 async function runGateValidationTests() {
   console.log('==============================================================================');
@@ -240,6 +245,41 @@ async function runGateValidationTests() {
     if (options.path === '/api/admin/users' || options.path?.includes('/api/admin/users/') || options.path === '/api/admin/promote-user') {
       return { statusCode: 401, data: { error: 'Token de autenticação não fornecido ou inválido.' } };
     }
+    if (options.path === '/api/payments/config') {
+      return {
+        statusCode: 200,
+        data: {
+          configured: false,
+          environment: 'sandbox',
+          effective_environment: 'sandbox',
+          public_key: '',
+          pix_enabled: true,
+          pix_instant_enabled: true,
+          credit_card_enabled: false,
+          boleto_enabled: false,
+        },
+      };
+    }
+    if (options.path === '/api/admin/payments/config' && !options.headers?.Authorization) {
+      return { statusCode: 401, data: { error: 'Token de autenticação não fornecido ou inválido.' } };
+    }
+    if (options.path === '/api/admin/payments/config' && options.headers?.Authorization?.includes('valid_admin_token')) {
+      return {
+        statusCode: 200,
+        data: {
+          success: true,
+          config: {
+            configured: false,
+            environment: 'production',
+            effective_environment: 'sandbox',
+            public_key: 'APP_USR-99887766-abcd-1234',
+            pix_enabled: true,
+            credit_card_enabled: false,
+            boleto_enabled: false,
+          },
+        },
+      };
+    }
     if (options.path === '/api/orders/create') {
       return { statusCode: 503, data: { error: 'Serviço de checkout temporariamente indisponível' } };
     }
@@ -252,7 +292,7 @@ async function runGateValidationTests() {
     summarySingleFailure.failed === 1 &&
     summarySingleFailure.passed === summarySingleFailure.total - 1;
 
-  console.log(`Gate Teste 8 (Cenário falho único 20/21 bloqueia aprovação geral): ${test8Ok ? '✅ APROVADO (Exatamente 1 falha injetada detectada, nenhum falso positivo gerado)' : '❌ FALHOU'}`);
+  console.log(`Gate Teste 8 (Cenário falho único 23/24 bloqueia aprovação geral): ${test8Ok ? '✅ APROVADO (Exatamente 1 falha injetada detectada, nenhum falso positivo gerado)' : '❌ FALHOU'}`);
   if (test8Ok) passedTests++;
 
   // --------------------------------------------------------------------------
@@ -830,6 +870,128 @@ async function runGateValidationTests() {
 
   console.log(`Gate Teste 17 (Autorização Check-in, Anti-Spoofing, Idempotência e Cancelamento Transacional): ${test17Ok ? '✅ APROVADO (Visitante 401, USER 403, Operador 200 com ID autenticado, idempotência estrita e proteção de status approved/refunded/in_process/cancelled)' : '❌ FALHOU'}`);
   if (test17Ok) passedTests++;
+
+  // --------------------------------------------------------------------------
+  // TESTE 18: Validação Estrita de Configurações de Pagamento Mercado Pago e Proteção de Segredos
+  // --------------------------------------------------------------------------
+  totalTests++;
+  const payValid = validatePaymentSettingsPayload({
+    environment: 'production',
+    public_key: 'APP_USR-12345678-9999-aaaa',
+    pix_enabled: true,
+    credit_card_enabled: false,
+    boleto_enabled: false,
+  });
+
+  const payCardBlocked = validatePaymentSettingsPayload({
+    environment: 'production',
+    public_key: 'APP_USR-12345678-9999-aaaa',
+    pix_enabled: true,
+    credit_card_enabled: true,
+    boleto_enabled: false,
+  });
+
+  const payBoletoBlocked = validatePaymentSettingsPayload({
+    environment: 'production',
+    public_key: 'APP_USR-12345678-9999-aaaa',
+    pix_enabled: true,
+    credit_card_enabled: false,
+    boleto_enabled: true,
+  });
+
+  const payInvalidEnv = validatePaymentSettingsPayload({
+    environment: 'staging_invalido',
+    public_key: 'APP_USR-12345678-9999-aaaa',
+    pix_enabled: true,
+    credit_card_enabled: false,
+    boleto_enabled: false,
+  });
+
+  const paySecretInjected = validatePaymentSettingsPayload({
+    environment: 'sandbox',
+    public_key: 'TEST-12345678-9999-aaaa',
+    access_token: 'APP_USR-PRIVATE-TOKEN',
+    pix_enabled: true,
+    credit_card_enabled: false,
+    boleto_enabled: false,
+  });
+
+  const paySecretInPublicKey = validatePaymentSettingsPayload(
+    {
+      environment: 'sandbox',
+      public_key: 'APP_USR-REAL-ACCESS-TOKEN-DO-SERVIDOR',
+      pix_enabled: true,
+      credit_card_enabled: false,
+      boleto_enabled: false,
+    },
+    { mpAccessToken: 'APP_USR-REAL-ACCESS-TOKEN-DO-SERVIDOR' }
+  );
+
+  const payAllDisabled = validatePaymentSettingsPayload({
+    environment: 'sandbox',
+    public_key: '',
+    pix_enabled: false,
+    credit_card_enabled: false,
+    boleto_enabled: false,
+  });
+
+  const canonicalUnconfiguredProd = buildCanonicalPaymentConfigResponse(
+    {
+      environment: 'production',
+      public_key: 'APP_USR-12345678-9999-aaaa',
+      pix_enabled: true,
+      pix_instant_enabled: true,
+      credit_card_enabled: false,
+      boleto_enabled: false,
+    },
+    { NODE_ENV: 'development', MP_ACCESS_TOKEN: '' } as any
+  );
+
+  const canonicalConfiguredProd = buildCanonicalPaymentConfigResponse(
+    {
+      environment: 'production',
+      public_key: 'APP_USR-12345678-9999-aaaa',
+      pix_enabled: true,
+      pix_instant_enabled: true,
+      credit_card_enabled: false,
+      boleto_enabled: false,
+    },
+    { NODE_ENV: 'production', MP_ACCESS_TOKEN: 'APP_USR-VALID-SECRET-TOKEN-999' } as any
+  );
+
+  const allowPix = isPaymentMethodAllowedByConfig('pix', canonicalConfiguredProd);
+  const blockCardWhenDisabled = isPaymentMethodAllowedByConfig('credit_card', canonicalConfiguredProd);
+
+  const test18Ok =
+    payValid.valid === true &&
+    payValid.statusCode === 200 &&
+    payCardBlocked.valid === false &&
+    payCardBlocked.statusCode === 400 &&
+    payCardBlocked.code === 'PAYMENT_METHOD_NOT_IMPLEMENTED' &&
+    payBoletoBlocked.valid === false &&
+    payBoletoBlocked.statusCode === 400 &&
+    payBoletoBlocked.code === 'PAYMENT_METHOD_NOT_IMPLEMENTED' &&
+    payInvalidEnv.valid === false &&
+    payInvalidEnv.statusCode === 400 &&
+    paySecretInjected.valid === false &&
+    paySecretInjected.statusCode === 400 &&
+    paySecretInPublicKey.valid === false &&
+    paySecretInPublicKey.statusCode === 400 &&
+    payAllDisabled.valid === false &&
+    payAllDisabled.statusCode === 400 &&
+    canonicalUnconfiguredProd.configured === false &&
+    canonicalUnconfiguredProd.environment === 'production' &&
+    canonicalUnconfiguredProd.effective_environment === 'sandbox' &&
+    Boolean(canonicalUnconfiguredProd.environment_warning) &&
+    canonicalConfiguredProd.configured === true &&
+    canonicalConfiguredProd.effective_environment === 'production' &&
+    canonicalConfiguredProd.environment_warning === null &&
+    (canonicalConfiguredProd as any).access_token === undefined &&
+    allowPix.allowed === true &&
+    blockCardWhenDisabled.allowed === false;
+
+  console.log(`Gate Teste 18 (Persistência e Segurança de Configurações Mercado Pago): ${test18Ok ? '✅ APROVADO (Rejeição de secrets, validação de ambiente efetivo vs preferência e bloqueio de método desativado)' : '❌ FALHOU'}`);
+  if (test18Ok) passedTests++;
 
   // Restaurar ambiente original
   if (originalUrl) process.env.STAGING_SUPABASE_URL = originalUrl;

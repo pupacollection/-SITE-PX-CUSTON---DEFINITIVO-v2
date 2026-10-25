@@ -225,7 +225,7 @@ export const INITIAL_MERCADO_PAGO_CONFIG: MercadoPagoConfig = {
   webhook_secret: '', // Gerenciado exclusivamente no backend via MP_WEBHOOK_SECRET
   pix_enabled: true,
   pix_instant_enabled: true,
-  credit_card_enabled: true,
+  credit_card_enabled: false,
   boleto_enabled: false,
   is_connected: false,
 };

@@ -21,6 +21,7 @@ export interface BuyerInfoRequest {
 }
 
 export interface CreateOrderPayload {
+  order_id?: string;
   event_id: string;
   event_title?: string;
   items: CheckoutItemRequest[];
@@ -51,10 +52,14 @@ export interface CreateOrderResponse {
     created_at: string;
   };
   payment: {
+    id?: string;
     status: PaymentStatus;
     method: PaymentMethod;
-    preference_id: string;
+    external_reference?: string;
+    preference_id?: string;
     pix_copy_paste?: string | null;
+    pix_qr_code_base64?: string | null;
+    ticket_url?: string | null;
     expires_at?: string;
     expires_in_seconds?: number;
     message: string;
@@ -68,6 +73,7 @@ export interface OrderStatusResponse {
   total: number;
   updated_at: string;
   expired?: boolean;
+  reconciliation_pending?: boolean;
   message?: string;
 }
 

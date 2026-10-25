@@ -18,6 +18,10 @@ import { PWAInstallPrompt } from './components/common/PWAInstallPrompt';
 import { OfflineBanner } from './components/common/OfflineBanner';
 import { supabase, getCurrentUserProfile, signOutUser } from './lib/supabase';
 import { getPwaBranding, applyDynamicPwaIcons } from './services/brandingService';
+import {
+  fetchPaymentSettings,
+  mapServerResponseToMercadoPagoConfig,
+} from './services/paymentSettingsService';
 
 // Views
 import { HomeView } from './views/HomeView';
@@ -165,7 +169,7 @@ export default function App() {
     }
   }, []);
 
-  // Sincronização e aplicação dinâmica dos ícones do PWA
+  // Sincronização e aplicação dinâmica dos ícones do PWA e configurações de pagamento
   React.useEffect(() => {
     getPwaBranding()
       .then((branding) => {
@@ -173,6 +177,14 @@ export default function App() {
       })
       .catch((err) => {
         console.warn('[Branding] Falha ao sincronizar ícones do PWA:', err);
+      });
+
+    fetchPaymentSettings()
+      .then((paymentData) => {
+        setMercadoPagoConfig((prev) => mapServerResponseToMercadoPagoConfig(paymentData, prev));
+      })
+      .catch((err) => {
+        console.warn('[PX CUSTON] Falha ao carregar configurações iniciais de pagamento:', err);
       });
   }, []);
 
@@ -490,7 +502,14 @@ export default function App() {
             event={selectedEvent}
             selectedBatches={selectedBatches}
             user={user}
+            paymentConfig={mercadoPagoConfig}
             onSuccess={handleCheckoutSuccess}
+            onPaymentApproved={() => {
+              if (user?.id) {
+                fetchUserTicketsFromDatabase(user.id, user.full_name);
+              }
+              fetchEventsFromDatabase();
+            }}
             onCancel={handleGoBack}
             onNavigate={handleNavigate}
           />
