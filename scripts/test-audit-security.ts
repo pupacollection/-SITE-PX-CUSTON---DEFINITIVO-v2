@@ -1447,6 +1447,572 @@ async function runSecurityAuditTests() {
     } catch {}
   }
 
+  // ---------------------------------------------------------------------------
+  // 14. RBAC — Execução Real do Handler handleAdminUserRoleUpdate (Cenários Obrigatórios)
+  // ---------------------------------------------------------------------------
+  console.log('\n[14] RBAC — Execução do Handler handleAdminUserRoleUpdate (RPC, Auth, Rollback Seguro e Auditoria Compensatória)');
+
+  process.env.PX_SKIP_SERVER_AUTOSTART = 'true';
+  const { handleAdminUserRoleUpdate } = await import('../server');
+
+  const SUPER_ADMIN_ACTOR_ID = '11111111-1111-4111-8111-111111111111';
+  const ADMIN_ACTOR_ID = '22222222-2222-4222-8222-222222222222';
+  const TARGET_USER_ID = '33333333-3333-4333-8333-333333333333';
+
+  interface MockRoleUpdateOptions {
+    actorId?: string;
+    actorRole?: string;
+    targetUserId?: string;
+    requestedRole?: string;
+    targetCurrentRole?: string | null;
+    superAdminCount?: number;
+    rpcResult?: { data: any; error: any };
+    authGetUserResult?: { data: any; error: any };
+    authGetUserThrows?: Error;
+    authUpdateUserError?: { message: string } | null;
+    rollbackUpdateError?: { message: string } | null;
+    rollbackZeroRows?: boolean;
+    concurrentRoleBeforeRollback?: string | null;
+    auditInsertError?: { message: string } | null;
+  }
+
+  async function invokeRoleUpdateScenario(opts: MockRoleUpdateOptions) {
+    const actorId = opts.actorId ?? SUPER_ADMIN_ACTOR_ID;
+    const actorRole = opts.actorRole ?? 'SUPER_ADMIN';
+    const targetUserId = opts.targetUserId ?? TARGET_USER_ID;
+    const requestedRole = opts.requestedRole ?? 'ADMIN';
+    const targetCurrentRole =
+      opts.targetCurrentRole !== undefined ? opts.targetCurrentRole : 'USER';
+    const otherSuperAdminsCount = opts.superAdminCount !== undefined ? Math.max(0, opts.superAdminCount - 1) : 1;
+
+    let currentPersistedRole = targetCurrentRole;
+    let rpcCalls = 0;
+    let profilesDirectUpdateCalls = 0;
+    let lastProfilesUpdatePayload: any = null;
+    const profilesUpdateFilterConditions: Array<{ column: string; value: any }> = [];
+    let authGetUserCalls = 0;
+    let authUpdateCalls = 0;
+    let lastAuthMetadataPayload: any = null;
+    let auditInsertCalls = 0;
+    let lastAuditPayload: any = null;
+    const allAuditPayloads: any[] = [];
+
+    const mockAdminClient = {
+      from(table: string) {
+        if (table === 'profiles') {
+          return {
+            select(_cols: string, selectOpts?: any) {
+              if (selectOpts?.head) {
+                return {
+                  eq() {
+                    return {
+                      neq() {
+                        return Promise.resolve({ count: otherSuperAdminsCount, error: null });
+                      },
+                    };
+                  },
+                };
+              }
+              return {
+                eq() {
+                  return {
+                    maybeSingle() {
+                      if (currentPersistedRole === null) {
+                        return Promise.resolve({ data: null, error: null });
+                      }
+                      return Promise.resolve({
+                        data: {
+                          id: targetUserId,
+                          role: currentPersistedRole,
+                          email: 'target@pxcustom.com.br',
+                          full_name: 'Target User',
+                        },
+                        error: null,
+                      });
+                    },
+                  };
+                },
+              };
+            },
+            update(payload: any) {
+              profilesDirectUpdateCalls++;
+              lastProfilesUpdatePayload = payload;
+              const currentCallFilters: Array<{ column: string; value: any }> = [];
+
+              const executeUpdate = () => {
+                if (opts.rollbackUpdateError) {
+                  return Promise.resolve({
+                    data: null,
+                    error: opts.rollbackUpdateError,
+                  });
+                }
+                if (opts.rollbackZeroRows) {
+                  return Promise.resolve({
+                    data: [],
+                    error: null,
+                  });
+                }
+                // Verificar condição otimista .eq('role', expectedRole) se fornecida
+                const roleFilter = currentCallFilters.find((f) => f.column === 'role');
+                if (roleFilter && currentPersistedRole !== roleFilter.value) {
+                  // Concorrência detectada: a linha não corresponde ao role esperado, 0 linhas afetadas!
+                  return Promise.resolve({
+                    data: [],
+                    error: null,
+                  });
+                }
+                if (payload?.role) {
+                  currentPersistedRole = payload.role;
+                }
+                return Promise.resolve({
+                  data: [{ id: targetUserId, role: currentPersistedRole }],
+                  error: null,
+                });
+              };
+
+              const filterBuilder: any = {
+                eq(column: string, value: any) {
+                  currentCallFilters.push({ column, value });
+                  profilesUpdateFilterConditions.push({ column, value });
+                  return filterBuilder;
+                },
+                select(_cols?: string) {
+                  return executeUpdate();
+                },
+                then(onFulfilled: any, onRejected: any) {
+                  return executeUpdate().then(onFulfilled, onRejected);
+                },
+              };
+
+              return filterBuilder;
+            },
+          };
+        }
+        if (table === 'audit_logs') {
+          return {
+            insert(payload: any) {
+              auditInsertCalls++;
+              lastAuditPayload = payload;
+              allAuditPayloads.push(payload);
+              return Promise.resolve({
+                data: null,
+                error: opts.auditInsertError ?? null,
+              });
+            },
+          };
+        }
+        throw new Error(`Unexpected table access in mockAdminClient: ${table}`);
+      },
+      auth: {
+        admin: {
+          getUserById(_id: string) {
+            authGetUserCalls++;
+            if (opts.authGetUserThrows) {
+              return Promise.reject(opts.authGetUserThrows);
+            }
+            return Promise.resolve(
+              opts.authGetUserResult ?? {
+                data: {
+                  user: {
+                    id: targetUserId,
+                    user_metadata: { full_name: 'Target User', custom_flag: true },
+                    app_metadata: { provider: 'email', tenant_tag: 'px-official' },
+                  },
+                },
+                error: null,
+              }
+            );
+          },
+          updateUserById(_id: string, payload: any) {
+            authUpdateCalls++;
+            lastAuthMetadataPayload = payload;
+            // Simular alteração concorrente que ocorreu no banco entre a RPC e o término de updateUserById
+            if (opts.concurrentRoleBeforeRollback) {
+              currentPersistedRole = opts.concurrentRoleBeforeRollback;
+            }
+            return Promise.resolve({
+              data: { user: { id: targetUserId } },
+              error: opts.authUpdateUserError ?? null,
+            });
+          },
+        },
+      },
+    };
+
+    const mockRpcClient = {
+      rpc(fnName: string, params: any) {
+        rpcCalls++;
+        if (fnName !== 'admin_set_user_role') {
+          throw new Error(`Unexpected RPC called: ${fnName}`);
+        }
+        const resolved = opts.rpcResult ?? {
+          data: {
+            success: true,
+            target_id: params.target_user_id,
+            old_role: targetCurrentRole,
+            new_role: params.new_role,
+          },
+          error: null,
+        };
+        if (!resolved.error && resolved.data?.success === true) {
+          currentPersistedRole = params.new_role;
+        }
+        return Promise.resolve(resolved);
+      },
+    };
+
+    let statusCode = 200;
+    let responseBody: any = null;
+
+    const req: any = {
+      params: { id: targetUserId },
+      body: { role: requestedRole },
+      headers: { authorization: 'Bearer test-jwt-token' },
+      user: { id: actorId, email: 'admin@pxcustom.com.br', role: actorRole },
+      userRole: actorRole,
+      ip: '127.0.0.1',
+    };
+
+    const res: any = {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        responseBody = payload;
+        return this;
+      },
+    };
+
+    await handleAdminUserRoleUpdate(req, res, {
+      adminClient: mockAdminClient as any,
+      rpcClient: mockRpcClient as any,
+    });
+
+    return {
+      statusCode,
+      responseBody,
+      rpcCalls,
+      profilesDirectUpdateCalls,
+      lastProfilesUpdatePayload,
+      profilesUpdateFilterConditions,
+      authGetUserCalls,
+      authUpdateCalls,
+      lastAuthMetadataPayload,
+      auditInsertCalls,
+      lastAuditPayload,
+      allAuditPayloads,
+      currentPersistedRole,
+    };
+  }
+
+  // 14.1 Falha em getUserById antes da RPC: nenhuma alteração de cargo
+  const sc1GetUserErr = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authGetUserResult: {
+      data: { user: null },
+      error: { message: 'Supabase Auth GoTrue service unavailable' },
+    },
+  });
+  const sc1GetUserThrows = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authGetUserThrows: new Error('Network timeout reaching Auth API'),
+  });
+  assert(
+    sc1GetUserErr.statusCode === 502 &&
+      sc1GetUserErr.responseBody?.code === 'AUTH_USER_LOOKUP_FAILED' &&
+      sc1GetUserErr.rpcCalls === 0 &&
+      sc1GetUserErr.profilesDirectUpdateCalls === 0 &&
+      sc1GetUserErr.authUpdateCalls === 0 &&
+      sc1GetUserErr.auditInsertCalls === 0 &&
+      sc1GetUserErr.currentPersistedRole === 'USER' &&
+      sc1GetUserThrows.statusCode === 502 &&
+      sc1GetUserThrows.responseBody?.code === 'AUTH_USER_LOOKUP_FAILED' &&
+      sc1GetUserThrows.rpcCalls === 0 &&
+      sc1GetUserThrows.profilesDirectUpdateCalls === 0 &&
+      sc1GetUserThrows.authUpdateCalls === 0 &&
+      sc1GetUserThrows.currentPersistedRole === 'USER',
+    'Cenário 14.1: Falha ou exceção em getUserById aborta antes da RPC (HTTP 502 AUTH_USER_LOOKUP_FAILED), sem alterar public.profiles nem substituir metadados por objetos vazios'
+  );
+
+  // 14.2 Falha na sincronização do Auth seguida de rollback bem-sucedido e auditoria compensatória
+  const sc2RollbackOk = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth service unavailable during updateUserById' },
+    rollbackUpdateError: null,
+  });
+  assert(
+    sc2RollbackOk.statusCode === 502 &&
+      sc2RollbackOk.responseBody?.code === 'AUTH_METADATA_SYNC_FAILED' &&
+      sc2RollbackOk.responseBody?.rolledBack === true &&
+      sc2RollbackOk.responseBody?.compensation_audit_logged === true &&
+      sc2RollbackOk.profilesDirectUpdateCalls === 1 &&
+      sc2RollbackOk.lastProfilesUpdatePayload?.role === 'USER' &&
+      sc2RollbackOk.profilesUpdateFilterConditions.some((f) => f.column === 'id' && f.value === TARGET_USER_ID) &&
+      sc2RollbackOk.profilesUpdateFilterConditions.some((f) => f.column === 'role' && f.value === 'ADMIN') &&
+      sc2RollbackOk.currentPersistedRole === 'USER' &&
+      sc2RollbackOk.auditInsertCalls === 1 &&
+      sc2RollbackOk.lastAuditPayload?.action === 'ROLE_CHANGE_ROLLED_BACK' &&
+      sc2RollbackOk.lastAuditPayload?.details?.rolled_back === true &&
+      sc2RollbackOk.lastAuditPayload?.details?.old_role === 'USER' &&
+      sc2RollbackOk.lastAuditPayload?.details?.attempted_role === 'ADMIN' &&
+      sc2RollbackOk.lastAuditPayload?.details?.reverted_to_role === 'USER',
+    'Cenário 14.2: Falha na sincronização do Auth executa rollback otimista (.eq("role", newRole)), confirma linha revertida, grava ROLE_CHANGE_ROLLED_BACK e retorna HTTP 502 (rolledBack: true)'
+  );
+
+  // 14.3 Falha explícita no rollback
+  const sc3RollbackErr = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'CHECKIN_OPERATOR',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth timeout' },
+    rollbackUpdateError: { message: 'Database write lock timeout during rollback' },
+  });
+  assert(
+    sc3RollbackErr.statusCode === 500 &&
+      sc3RollbackErr.responseBody?.code === 'AUTH_SYNC_AND_ROLLBACK_FAILED' &&
+      sc3RollbackErr.responseBody?.rolledBack === false &&
+      sc3RollbackErr.responseBody?.rollback_failure_code === 'ROLLBACK_QUERY_ERROR' &&
+      sc3RollbackErr.responseBody?.compensation_audit_logged === true &&
+      typeof sc3RollbackErr.responseBody?.rollback_error === 'string' &&
+      sc3RollbackErr.profilesDirectUpdateCalls === 1 &&
+      sc3RollbackErr.auditInsertCalls === 1 &&
+      sc3RollbackErr.lastAuditPayload?.action === 'ROLE_CHANGE_ROLLBACK_FAILED' &&
+      sc3RollbackErr.lastAuditPayload?.details?.rolled_back === false &&
+      sc3RollbackErr.lastAuditPayload?.details?.rollback_failure_code === 'ROLLBACK_QUERY_ERROR',
+    'Cenário 14.3: Falha explícita no rollback retorna HTTP 500 (AUTH_SYNC_AND_ROLLBACK_FAILED, rolledBack: false) e registra auditoria ROLE_CHANGE_ROLLBACK_FAILED'
+  );
+
+  // 14.4 Rollback sem atualização de nenhuma linha (0 rows affected sem erro explícito do Supabase)
+  const sc4ZeroRows = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth gateway error' },
+    rollbackZeroRows: true,
+  });
+  assert(
+    sc4ZeroRows.statusCode === 500 &&
+      sc4ZeroRows.responseBody?.code === 'AUTH_SYNC_AND_ROLLBACK_FAILED' &&
+      sc4ZeroRows.responseBody?.rolledBack === false &&
+      sc4ZeroRows.responseBody?.rollback_failure_code === 'ROLLBACK_NO_ROWS_AFFECTED' &&
+      sc4ZeroRows.responseBody?.compensation_audit_logged === true &&
+      sc4ZeroRows.auditInsertCalls === 1 &&
+      sc4ZeroRows.lastAuditPayload?.action === 'ROLE_CHANGE_ROLLBACK_FAILED' &&
+      sc4ZeroRows.lastAuditPayload?.details?.rolled_back === false &&
+      sc4ZeroRows.lastAuditPayload?.details?.rollback_failure_code === 'ROLLBACK_NO_ROWS_AFFECTED',
+    'Cenário 14.4: Rollback que não retorna erro mas afeta 0 linhas não afirma que foi concluído (rolledBack: false, ROLLBACK_NO_ROWS_AFFECTED) e registra ROLE_CHANGE_ROLLBACK_FAILED'
+  );
+
+  // 14.5 Alteração concorrente do cargo antes do rollback
+  const sc5Concurrent = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth sync failed after concurrent admin update' },
+    concurrentRoleBeforeRollback: 'CHECKIN_OPERATOR',
+  });
+  assert(
+    sc5Concurrent.statusCode === 500 &&
+      sc5Concurrent.responseBody?.code === 'AUTH_SYNC_AND_ROLLBACK_FAILED' &&
+      sc5Concurrent.responseBody?.rolledBack === false &&
+      sc5Concurrent.responseBody?.concurrent_change_detected === true &&
+      sc5Concurrent.responseBody?.rollback_failure_code === 'CONCURRENT_ROLE_MODIFICATION_DETECTED' &&
+      sc5Concurrent.responseBody?.observed_current_role === 'CHECKIN_OPERATOR' &&
+      sc5Concurrent.currentPersistedRole === 'CHECKIN_OPERATOR' &&
+      sc5Concurrent.auditInsertCalls === 1 &&
+      sc5Concurrent.lastAuditPayload?.action === 'ROLE_CHANGE_ROLLBACK_FAILED' &&
+      sc5Concurrent.lastAuditPayload?.details?.concurrent_change_detected === true &&
+      sc5Concurrent.lastAuditPayload?.details?.observed_current_role === 'CHECKIN_OPERATOR',
+    'Cenário 14.5: Alteração concorrente antes do rollback é preservada pela trava otimista (.eq("role", newRole)), não sobrescreve o novo cargo concorrente e registra ROLE_CHANGE_ROLLBACK_FAILED'
+  );
+
+  // 14.6 Falha na auditoria compensatória (tanto após rollback concluído quanto após falha de rollback)
+  const sc6CompAuditFailOnRollbackOk = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth sync error' },
+    rollbackUpdateError: null,
+    auditInsertError: { message: 'audit_logs write failure during compensation' },
+  });
+  const sc6CompAuditFailOnRollbackErr = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    authUpdateUserError: { message: 'Auth sync error' },
+    rollbackUpdateError: { message: 'DB error during rollback' },
+    auditInsertError: { message: 'audit_logs write failure during rollback error' },
+  });
+  assert(
+    sc6CompAuditFailOnRollbackOk.statusCode === 502 &&
+      sc6CompAuditFailOnRollbackOk.responseBody?.rolledBack === true &&
+      sc6CompAuditFailOnRollbackOk.responseBody?.compensation_audit_logged === false &&
+      typeof sc6CompAuditFailOnRollbackOk.responseBody?.compensation_audit_error === 'string' &&
+      sc6CompAuditFailOnRollbackErr.statusCode === 500 &&
+      sc6CompAuditFailOnRollbackErr.responseBody?.rolledBack === false &&
+      sc6CompAuditFailOnRollbackErr.responseBody?.compensation_audit_logged === false &&
+      typeof sc6CompAuditFailOnRollbackErr.responseBody?.compensation_audit_error === 'string',
+    'Cenário 14.6: Falha ao gravar auditoria compensatória verifica explicitamente o campo error do Supabase e sinaliza compensation_audit_logged: false e compensation_audit_error'
+  );
+
+  // 14.7 Fluxo normal: RPC e Auth bem-sucedidos, preservando user_metadata e app_metadata, sem auditoria duplicada
+  const sc7Normal = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+  });
+  assert(
+    sc7Normal.statusCode === 200 &&
+      sc7Normal.responseBody?.success === true &&
+      sc7Normal.responseBody?.old_role === 'USER' &&
+      sc7Normal.responseBody?.new_role === 'ADMIN' &&
+      sc7Normal.responseBody?.user?.role === 'ADMIN' &&
+      sc7Normal.rpcCalls === 1 &&
+      sc7Normal.profilesDirectUpdateCalls === 0 &&
+      sc7Normal.authGetUserCalls === 1 &&
+      sc7Normal.authUpdateCalls === 1 &&
+      sc7Normal.lastAuthMetadataPayload?.user_metadata?.role === 'ADMIN' &&
+      sc7Normal.lastAuthMetadataPayload?.user_metadata?.custom_flag === true &&
+      sc7Normal.lastAuthMetadataPayload?.user_metadata?.full_name === 'Target User' &&
+      sc7Normal.lastAuthMetadataPayload?.app_metadata?.role === 'ADMIN' &&
+      sc7Normal.lastAuthMetadataPayload?.app_metadata?.provider === 'email' &&
+      sc7Normal.lastAuthMetadataPayload?.app_metadata?.tenant_tag === 'px-official' &&
+      sc7Normal.auditInsertCalls === 0 &&
+      sc7Normal.responseBody?.audit_warning === undefined,
+    'Cenário 14.7: Fluxo normal (RPC + Auth) retorna HTTP 200, preserva todos os campos de user_metadata e app_metadata, não faz update direto em public.profiles e não duplica audit_logs'
+  );
+
+  // 14.8 RPC com erro (autorização 403 e erro inesperado 500): nenhuma alteração direta de cargo
+  const sc8RpcAuthDenied = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+    rpcResult: {
+      data: null,
+      error: { message: 'Acesso negado: Apenas SUPER_ADMIN pode conceder ou alterar cargos administrativos.' },
+    },
+  });
+  const sc8RpcUnexpectedErr = await invokeRoleUpdateScenario({
+    actorRole: 'SUPER_ADMIN',
+    targetCurrentRole: 'USER',
+    requestedRole: 'CHECKIN_OPERATOR',
+    rpcResult: {
+      data: null,
+      error: { message: 'connection to database failed unexpectedly' },
+    },
+  });
+  assert(
+    sc8RpcAuthDenied.statusCode === 403 &&
+      sc8RpcAuthDenied.responseBody?.code === 'RPC_AUTHORIZATION_DENIED' &&
+      sc8RpcAuthDenied.rpcCalls === 1 &&
+      sc8RpcAuthDenied.profilesDirectUpdateCalls === 0 &&
+      sc8RpcAuthDenied.authUpdateCalls === 0 &&
+      sc8RpcAuthDenied.auditInsertCalls === 0 &&
+      sc8RpcUnexpectedErr.statusCode === 500 &&
+      sc8RpcUnexpectedErr.responseBody?.code === 'RPC_EXECUTION_FAILED' &&
+      sc8RpcUnexpectedErr.rpcCalls === 1 &&
+      sc8RpcUnexpectedErr.profilesDirectUpdateCalls === 0 &&
+      sc8RpcUnexpectedErr.authUpdateCalls === 0 &&
+      sc8RpcUnexpectedErr.auditInsertCalls === 0,
+    'Cenário 14.8: RPC com erro de autorização (403) ou erro inesperado (500) jamais executa fallback de alteração direta em public.profiles nem altera Auth'
+  );
+
+  // 14.9 Retorno inválido da RPC (null, {}, { success: false }, [])
+  const sc9Null = await invokeRoleUpdateScenario({
+    rpcResult: { data: null, error: null },
+  });
+  const sc9EmptyObj = await invokeRoleUpdateScenario({
+    rpcResult: { data: {}, error: null },
+  });
+  const sc9False = await invokeRoleUpdateScenario({
+    rpcResult: { data: { success: false }, error: null },
+  });
+  const sc9Array = await invokeRoleUpdateScenario({
+    rpcResult: { data: [{ success: true }], error: null },
+  });
+  assert(
+    sc9Null.statusCode === 500 &&
+      sc9Null.responseBody?.code === 'RPC_UNEXPECTED_RESULT' &&
+      sc9Null.profilesDirectUpdateCalls === 0 &&
+      sc9Null.authUpdateCalls === 0 &&
+      sc9EmptyObj.statusCode === 500 &&
+      sc9EmptyObj.responseBody?.code === 'RPC_UNEXPECTED_RESULT' &&
+      sc9EmptyObj.profilesDirectUpdateCalls === 0 &&
+      sc9False.statusCode === 500 &&
+      sc9False.responseBody?.code === 'RPC_UNEXPECTED_RESULT' &&
+      sc9False.profilesDirectUpdateCalls === 0 &&
+      sc9Array.statusCode === 500 &&
+      sc9Array.responseBody?.code === 'RPC_UNEXPECTED_RESULT' &&
+      sc9Array.profilesDirectUpdateCalls === 0,
+    'Cenário 14.9: Retorno inválido da RPC sem rpcData.success === true (null, {}, { success: false }, array) retorna HTTP 500 (RPC_UNEXPECTED_RESULT) sem tocar em public.profiles ou Auth'
+  );
+
+  // 14.10 Proteção do último SUPER_ADMIN, proibição de autoalteração e hierarquia de ADMIN
+  const sc10LastSuper = await invokeRoleUpdateScenario({
+    actorId: SUPER_ADMIN_ACTOR_ID,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId: TARGET_USER_ID,
+    targetCurrentRole: 'SUPER_ADMIN',
+    requestedRole: 'ADMIN',
+    superAdminCount: 1,
+  });
+  const sc10SelfChange = await invokeRoleUpdateScenario({
+    actorId: SUPER_ADMIN_ACTOR_ID,
+    actorRole: 'SUPER_ADMIN',
+    targetUserId: SUPER_ADMIN_ACTOR_ID,
+    targetCurrentRole: 'SUPER_ADMIN',
+    requestedRole: 'ADMIN',
+    superAdminCount: 3,
+  });
+  const sc10PromoteSuper = await invokeRoleUpdateScenario({
+    actorId: ADMIN_ACTOR_ID,
+    actorRole: 'ADMIN',
+    targetUserId: TARGET_USER_ID,
+    targetCurrentRole: 'USER',
+    requestedRole: 'SUPER_ADMIN',
+  });
+  const sc10PromoteAdmin = await invokeRoleUpdateScenario({
+    actorId: ADMIN_ACTOR_ID,
+    actorRole: 'ADMIN',
+    targetUserId: TARGET_USER_ID,
+    targetCurrentRole: 'USER',
+    requestedRole: 'ADMIN',
+  });
+  const sc10ModifyAdmin = await invokeRoleUpdateScenario({
+    actorId: ADMIN_ACTOR_ID,
+    actorRole: 'ADMIN',
+    targetUserId: TARGET_USER_ID,
+    targetCurrentRole: 'ADMIN',
+    requestedRole: 'USER',
+  });
+  assert(
+    sc10LastSuper.statusCode === 403 &&
+      sc10LastSuper.responseBody?.code === 'LAST_SUPER_ADMIN_PROTECTED' &&
+      sc10LastSuper.rpcCalls === 0 &&
+      sc10LastSuper.profilesDirectUpdateCalls === 0 &&
+      sc10SelfChange.statusCode === 403 &&
+      sc10SelfChange.responseBody?.code === 'SELF_ROLE_CHANGE_FORBIDDEN' &&
+      sc10SelfChange.rpcCalls === 0 &&
+      sc10SelfChange.profilesDirectUpdateCalls === 0 &&
+      sc10PromoteSuper.statusCode === 403 &&
+      sc10PromoteSuper.responseBody?.code === 'ADMIN_CANNOT_GRANT_ADMIN_ROLES' &&
+      sc10PromoteSuper.rpcCalls === 0 &&
+      sc10PromoteAdmin.statusCode === 403 &&
+      sc10PromoteAdmin.responseBody?.code === 'ADMIN_CANNOT_GRANT_ADMIN_ROLES' &&
+      sc10PromoteAdmin.rpcCalls === 0 &&
+      sc10ModifyAdmin.statusCode === 403 &&
+      sc10ModifyAdmin.responseBody?.code === 'ADMIN_CANNOT_MODIFY_ADMINS' &&
+      sc10ModifyAdmin.rpcCalls === 0,
+    'Cenário 14.10: Proteção do último SUPER_ADMIN, proibição de autoalteração e bloqueio de escalonamento por ADMIN retornam HTTP 403 sem chamar a RPC'
+  );
+
   console.log(`\n========================================`);
   console.log(`📊 Resultado dos Testes: ${passedTests}/${totalTests} aprovados!`);
   console.log(`========================================\n`);

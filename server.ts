@@ -909,9 +909,30 @@ app.get(
   }
 );
 
+// Dependências opcionais injetáveis para testes automatizados da rota de alteração de papel (RBAC)
+export interface AdminRoleUpdateDeps {
+  adminClient?: any;
+  rpcClient?: any;
+  publishableKey?: string;
+  supabaseUrlOverride?: string;
+  createClientFn?: typeof createClient;
+}
+
 // Handler centralizado e seguro para alteração de papel de usuário (RBAC)
-const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Response) => {
-  const targetUserId = String(req.params.id || req.body?.target_user_id || req.body?.user_id || '').trim();
+export const handleAdminUserRoleUpdate = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  nextOrDeps?: NextFunction | AdminRoleUpdateDeps
+) => {
+  const deps =
+    typeof nextOrDeps === 'object' && nextOrDeps !== null ? nextOrDeps : undefined;
+  const adminDb = deps?.adminClient || supabaseAdmin;
+  const effectivePublishableKey =
+    deps?.publishableKey !== undefined ? deps.publishableKey : supabasePublishableKey;
+  const effectiveSupabaseUrl = deps?.supabaseUrlOverride || supabaseUrl;
+  const createClientImpl = deps?.createClientFn || createClient;
+
+  const targetUserId = String(req.params?.id || req.body?.target_user_id || req.body?.user_id || '').trim();
   const newRole = typeof (req.body?.new_role ?? req.body?.role) === 'string'
     ? String(req.body?.new_role ?? req.body?.role).trim().toUpperCase()
     : req.body?.new_role ?? req.body?.role;
@@ -941,7 +962,7 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
 
   try {
     // 3. Consultar perfil real do usuário alvo em public.profiles
-    const { data: targetProfile, error: targetFetchError } = await supabaseAdmin
+    const { data: targetProfile, error: targetFetchError } = await adminDb
       .from('profiles')
       .select('id, email, full_name, role')
       .eq('id', targetUserId)
@@ -964,7 +985,7 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
     // 4. Contar outros SUPER_ADMINs ativos se o alvo for atualmente SUPER_ADMIN
     let otherSuperAdminsCount = 1;
     if (targetProfile.role === 'SUPER_ADMIN' && newRole !== 'SUPER_ADMIN') {
-      const { count, error: countError } = await supabaseAdmin
+      const { count, error: countError } = await adminDb
         .from('profiles')
         .select('id', { count: 'exact', head: true })
         .eq('role', 'SUPER_ADMIN')
@@ -980,7 +1001,7 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
 
     // 5. Avaliar política completa de hierarquia e segurança RBAC
     const policy = evaluateUserRoleChangePolicy({
-      actorUserId: req.user.id,
+      actorUserId: req.user?.id || '',
       actorRole: req.userRole || 'USER',
       targetUserId,
       targetCurrentRole: targetProfile.role,
@@ -1010,90 +1031,310 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
 
     const oldRole = targetProfile.role;
 
-    // 6. Obter metadados atuais do usuário no Supabase Auth para preservá-los integralmente
+    // 6. Consultar metadados atuais do usuário no Supabase Auth ANTES da RPC.
+    //    Se a consulta falhar, abortar imediatamente sem chamar a RPC e sem substituir metadados por objeto vazio.
     let existingUserMetadata: Record<string, unknown> = {};
+    let existingAppMetadata: Record<string, unknown> = {};
     try {
-      const { data: authUserResult } = await supabaseAdmin.auth.admin.getUserById(targetUserId);
-      if (authUserResult?.user?.user_metadata && typeof authUserResult.user.user_metadata === 'object') {
+      const { data: authUserResult, error: authGetError } = await adminDb.auth.admin.getUserById(targetUserId);
+      if (authGetError || !authUserResult?.user) {
+        const errMsg =
+          authGetError?.message || 'Usuário alvo não localizado ou inacessível no Supabase Auth.';
+        console.error(
+          '[PX CONTROL Users] Falha ao consultar usuário no Supabase Auth antes da RPC (operação abortada sem alterar cargo):',
+          errMsg
+        );
+        return res.status(502).json({
+          error:
+            'Não foi possível consultar os metadados atuais do usuário no Supabase Auth. A alteração de cargo foi abortada preventivamente para preservar os metadados e a consistência.',
+          details: errMsg,
+          code: 'AUTH_USER_LOOKUP_FAILED',
+        });
+      }
+
+      if (
+        authUserResult.user.user_metadata &&
+        typeof authUserResult.user.user_metadata === 'object' &&
+        !Array.isArray(authUserResult.user.user_metadata)
+      ) {
         existingUserMetadata = { ...authUserResult.user.user_metadata };
       }
-    } catch {
-      // Prosseguir com objeto seguro caso o usuário Auth seja consultado apenas na atualização
+
+      if (
+        authUserResult.user.app_metadata &&
+        typeof authUserResult.user.app_metadata === 'object' &&
+        !Array.isArray(authUserResult.user.app_metadata)
+      ) {
+        existingAppMetadata = { ...authUserResult.user.app_metadata };
+      }
+    } catch (authGetErr: any) {
+      const errMsg =
+        authGetErr?.message || 'Exceção ao consultar usuário no Supabase Auth.';
+      console.error(
+        '[PX CONTROL Users] Exceção ao consultar usuário no Supabase Auth antes da RPC (operação abortada sem alterar cargo):',
+        errMsg
+      );
+      return res.status(502).json({
+        error:
+          'Falha de comunicação ao consultar o Supabase Auth antes da alteração de cargo. Nenhuma alteração foi realizada.',
+        details: errMsg,
+        code: 'AUTH_USER_LOOKUP_FAILED',
+      });
     }
 
-    // 7. Executar atualização no PostgreSQL (priorizando a procedure SECURITY DEFINER admin_set_user_role com JWT do administrador)
-    let rpcAuditLogged = false;
-    const authHeader = req.headers.authorization;
-    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    // 7. Executar obrigatoriamente a procedure SQL SECURITY DEFINER admin_set_user_role com JWT do administrador
+    //    (Sem fallback de atualização direta em public.profiles via supabaseAdmin)
+    const authHeader = req.headers?.authorization;
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
-    if (bearerToken && supabasePublishableKey) {
-      const userScopedClient = createClient(supabaseUrl, supabasePublishableKey, {
+    if (!deps?.rpcClient && (!bearerToken || !effectivePublishableKey)) {
+      return res.status(503).json({
+        error: 'Serviço temporariamente indisponível: credenciais de contexto para execução da procedure admin_set_user_role não configuradas.',
+        code: 'RPC_CLIENT_NOT_CONFIGURED',
+      });
+    }
+
+    const userScopedClient =
+      deps?.rpcClient ||
+      createClientImpl(effectiveSupabaseUrl, effectivePublishableKey, {
         auth: { autoRefreshToken: false, persistSession: false },
         global: { headers: { Authorization: `Bearer ${bearerToken}` } },
       });
 
-      const { data: rpcData, error: rpcErr } = await userScopedClient.rpc('admin_set_user_role', {
-        target_user_id: targetUserId,
-        new_role: newRole,
-      });
-
-      if (rpcErr) {
-        const msg = rpcErr.message || '';
-        if (
-          msg.includes('Acesso negado') ||
-          msg.includes('Ação bloqueada') ||
-          msg.includes('Privilégios insuficientes') ||
-          msg.includes('próprios privilégios')
-        ) {
-          return res.status(403).json({ error: msg });
-        }
-        if (msg.includes('Usuário não encontrado')) {
-          return res.status(404).json({ error: msg });
-        }
-      } else if (rpcData) {
-        rpcAuditLogged = true;
-      }
-    }
-
-    // Se a RPC via cliente autenticado não tiver sido executada (ex: chave anon ausente no servidor), atualizar via supabaseAdmin
-    if (!rpcAuditLogged) {
-      const { data: updatedRows, error: profileUpdateError } = await supabaseAdmin
-        .from('profiles')
-        .update({ role: newRole, updated_at: new Date().toISOString() })
-        .eq('id', targetUserId)
-        .select('id, email, full_name, role, updated_at');
-
-      if (profileUpdateError || !updatedRows || updatedRows.length === 0) {
-        return res.status(500).json({
-          error: 'Falha ao atualizar o papel do usuário na tabela oficial public.profiles.',
-          details: profileUpdateError?.message || 'Nenhum registro atualizado.',
-        });
-      }
-    }
-
-    // 8. Sincronizar user_metadata.role no Supabase Auth preservando todos os campos existentes
-    const mergedMetadata = mergeAuthUserMetadata(existingUserMetadata, newRole);
-    const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(targetUserId, {
-      user_metadata: mergedMetadata,
+    const { data: rpcData, error: rpcErr } = await userScopedClient.rpc('admin_set_user_role', {
+      target_user_id: targetUserId,
+      new_role: newRole,
     });
 
-    if (authUpdateError) {
-      // Rollback compensatório em public.profiles para evitar divergência entre banco e Auth
-      await supabaseAdmin
-        .from('profiles')
-        .update({ role: oldRole, updated_at: new Date().toISOString() })
-        .eq('id', targetUserId);
-
-      return res.status(502).json({
-        error: 'Falha ao sincronizar metadados no Supabase Auth. A alteração em public.profiles foi revertida automaticamente para manter a consistência.',
-        details: authUpdateError.message,
+    if (rpcErr) {
+      const msg = rpcErr.message || '';
+      if (
+        msg.includes('Acesso negado') ||
+        msg.includes('Ação bloqueada') ||
+        msg.includes('Privilégios insuficientes') ||
+        msg.includes('próprios privilégios') ||
+        (rpcErr as any).code === '42501'
+      ) {
+        return res.status(403).json({
+          error: msg || 'Acesso negado pela procedure de segurança admin_set_user_role.',
+          code: 'RPC_AUTHORIZATION_DENIED',
+        });
+      }
+      if (msg.includes('Usuário não encontrado')) {
+        return res.status(404).json({
+          error: msg,
+          code: 'TARGET_PROFILE_NOT_FOUND',
+        });
+      }
+      if (msg.includes('Parâmetro inválido')) {
+        return res.status(400).json({
+          error: msg,
+          code: 'INVALID_PARAMETER',
+        });
+      }
+      return res.status(500).json({
+        error: 'Falha ao executar a procedure oficial admin_set_user_role no banco de dados.',
+        details: msg || 'Erro inesperado na execução da RPC.',
+        code: 'RPC_EXECUTION_FAILED',
       });
     }
 
-    // 9. Registrar log de auditoria detalhado em public.audit_logs (se ainda não registrado pela RPC)
+    if (
+      !rpcData ||
+      typeof rpcData !== 'object' ||
+      Array.isArray(rpcData) ||
+      (rpcData as Record<string, unknown>).success !== true
+    ) {
+      return res.status(500).json({
+        error: 'A procedure admin_set_user_role não retornou confirmação explícita de sucesso (success: true). Operação abortada por segurança.',
+        code: 'RPC_UNEXPECTED_RESULT',
+      });
+    }
+
+    // A procedure SQL admin_set_user_role já grava atomicamente o log ROLE_CHANGED em public.audit_logs.
+    // O backend só deve inserir em public.audit_logs se a resposta indicar explicitamente audit_logged === false,
+    // evitando registros de auditoria duplicados.
+    const rpcAuditLogged = (rpcData as Record<string, unknown>).audit_logged !== false;
+
+    // 8. Sincronizar role em user_metadata e app_metadata no Supabase Auth preservando todos os campos existentes
+    const mergedUserMetadata = mergeAuthUserMetadata(existingUserMetadata, newRole);
+    const mergedAppMetadata = mergeAuthUserMetadata(existingAppMetadata, newRole);
+
+    let authUpdateError: { message: string } | null = null;
+    try {
+      const { error: updateErr } = await adminDb.auth.admin.updateUserById(targetUserId, {
+        user_metadata: mergedUserMetadata,
+        app_metadata: mergedAppMetadata,
+      });
+      if (updateErr) {
+        authUpdateError = {
+          message: updateErr.message || 'Erro ao atualizar metadados no Supabase Auth.',
+        };
+      }
+    } catch (updateEx: any) {
+      authUpdateError = {
+        message: updateEx?.message || 'Exceção ao atualizar metadados no Supabase Auth.',
+      };
+    }
+
+    if (authUpdateError) {
+      // Rollback compensatório seguro em public.profiles com condição otimista (.eq('role', newRole))
+      // e verificação explícita de linhas afetadas para evitar sobrescrever alterações concorrentes.
+      let rollbackConfirmed = false;
+      let rollbackFailureCode:
+        | 'ROLLBACK_QUERY_ERROR'
+        | 'CONCURRENT_ROLE_MODIFICATION_DETECTED'
+        | 'ROLLBACK_NO_ROWS_AFFECTED'
+        | null = null;
+      let rollbackErrorMessage: string | null = null;
+      let observedCurrentRole: string | null = null;
+      let concurrentChangeDetected = false;
+
+      try {
+        const { data: rolledBackRows, error: rollbackError } = await adminDb
+          .from('profiles')
+          .update({ role: oldRole, updated_at: new Date().toISOString() })
+          .eq('id', targetUserId)
+          .eq('role', newRole)
+          .select('id, role');
+
+        if (rollbackError) {
+          rollbackFailureCode = 'ROLLBACK_QUERY_ERROR';
+          rollbackErrorMessage =
+            rollbackError.message || 'Erro retornado pelo Supabase ao reverter public.profiles.';
+        } else if (Array.isArray(rolledBackRows) && rolledBackRows.length === 1) {
+          rollbackConfirmed = true;
+          observedCurrentRole = oldRole;
+        } else {
+          // Nenhuma linha atualizada: verificar estado atual do perfil para diagnosticar alteração concorrente
+          try {
+            const { data: currentProfileSnap } = await adminDb
+              .from('profiles')
+              .select('id, role')
+              .eq('id', targetUserId)
+              .maybeSingle();
+
+            if (currentProfileSnap?.role && currentProfileSnap.role !== newRole) {
+              concurrentChangeDetected = true;
+              observedCurrentRole = String(currentProfileSnap.role);
+              rollbackFailureCode = 'CONCURRENT_ROLE_MODIFICATION_DETECTED';
+              rollbackErrorMessage = `Rollback abortado por proteção de concorrência: o cargo atual em public.profiles foi alterado concorrentemente para "${observedCurrentRole}" (esperado "${newRole}").`;
+            } else {
+              observedCurrentRole = currentProfileSnap?.role ? String(currentProfileSnap.role) : null;
+              rollbackFailureCode = 'ROLLBACK_NO_ROWS_AFFECTED';
+              rollbackErrorMessage =
+                'A operação de rollback não retornou erro explícito, mas nenhuma linha foi atualizada em public.profiles.';
+            }
+          } catch {
+            rollbackFailureCode = 'ROLLBACK_NO_ROWS_AFFECTED';
+            rollbackErrorMessage =
+              'A operação de rollback não atualizou nenhuma linha e não foi possível consultar o estado atual do perfil.';
+          }
+        }
+      } catch (rbErr: any) {
+        rollbackFailureCode = 'ROLLBACK_QUERY_ERROR';
+        rollbackErrorMessage =
+          rbErr?.message || 'Exceção ao executar rollback compensatório em public.profiles.';
+      }
+
+      // Registrar evento de auditoria compensatória sem alterar nem apagar o registro original ROLE_CHANGED
+      const compensationAction = rollbackConfirmed
+        ? 'ROLE_CHANGE_ROLLED_BACK'
+        : 'ROLE_CHANGE_ROLLBACK_FAILED';
+
+      let compensationAuditLogged = false;
+      let compensationAuditError: string | null = null;
+
+      try {
+        const { error: compAuditErr } = await adminDb.from('audit_logs').insert({
+          actor_id: req.user?.id || null,
+          action: compensationAction,
+          entity: 'profiles',
+          entity_id: targetUserId,
+          details: {
+            old_role: oldRole,
+            attempted_role: newRole,
+            expected_role_before_rollback: newRole,
+            reverted_to_role: rollbackConfirmed ? oldRole : null,
+            observed_current_role: observedCurrentRole,
+            rolled_back: rollbackConfirmed,
+            concurrent_change_detected: concurrentChangeDetected,
+            rollback_failure_code: rollbackFailureCode,
+            rollback_error: rollbackErrorMessage,
+            auth_error: authUpdateError.message,
+            target_user_id: targetUserId,
+            target_email: targetProfile.email,
+            executed_by: req.user?.id || null,
+            executed_by_role: req.userRole || null,
+          },
+          ip_address: req.ip || null,
+        });
+
+        if (compAuditErr) {
+          compensationAuditError =
+            compAuditErr.message || 'Falha ao gravar auditoria compensatória em public.audit_logs.';
+          console.error(
+            `[PX CONTROL Users] Erro retornado pelo Supabase ao registrar auditoria compensatória (${compensationAction}):`,
+            compensationAuditError
+          );
+        } else {
+          compensationAuditLogged = true;
+        }
+      } catch (compAuditEx: any) {
+        compensationAuditError =
+          compAuditEx?.message || 'Exceção ao gravar auditoria compensatória em public.audit_logs.';
+        console.error(
+          `[PX CONTROL Users] Exceção ao registrar auditoria compensatória (${compensationAction}):`,
+          compensationAuditError
+        );
+      }
+
+      if (!rollbackConfirmed) {
+        console.error(
+          '[PX CONTROL Users] ALERTA CRÍTICO: Falha ao sincronizar Auth e rollback não confirmado em public.profiles:',
+          {
+            authError: authUpdateError.message,
+            rollbackFailureCode,
+            rollbackError: rollbackErrorMessage,
+            observedCurrentRole,
+            concurrentChangeDetected,
+            compensationAuditLogged,
+            compensationAuditError,
+          }
+        );
+        return res.status(500).json({
+          error: concurrentChangeDetected
+            ? 'Falha ao sincronizar metadados no Supabase Auth. O rollback automático foi abortado para não sobrescrever uma alteração concorrente detectada em public.profiles.'
+            : 'Falha crítica de consistência: Não foi possível sincronizar os metadados no Supabase Auth e a reversão automática em public.profiles não pôde ser confirmada.',
+          details: authUpdateError.message,
+          rollback_error: rollbackErrorMessage,
+          rollback_failure_code: rollbackFailureCode,
+          concurrent_change_detected: concurrentChangeDetected,
+          observed_current_role: observedCurrentRole,
+          code: 'AUTH_SYNC_AND_ROLLBACK_FAILED',
+          rolledBack: false,
+          compensation_audit_logged: compensationAuditLogged,
+          ...(compensationAuditError ? { compensation_audit_error: compensationAuditError } : {}),
+        });
+      }
+
+      return res.status(502).json({
+        error:
+          'Falha ao sincronizar metadados no Supabase Auth. A alteração em public.profiles foi revertida automaticamente para manter a consistência.',
+        details: authUpdateError.message,
+        code: 'AUTH_METADATA_SYNC_FAILED',
+        rolledBack: true,
+        compensation_audit_logged: compensationAuditLogged,
+        ...(compensationAuditError ? { compensation_audit_error: compensationAuditError } : {}),
+      });
+    }
+
+    // 9. Registrar log de auditoria em public.audit_logs apenas se não registrado pela RPC,
+    // evitando duplicidade e verificando explicitamente o campo { error } retornado pelo Supabase
+    let auditWarning: string | undefined;
     if (!rpcAuditLogged) {
       try {
-        await supabaseAdmin.from('audit_logs').insert({
+        const { error: auditError } = await adminDb.from('audit_logs').insert({
           actor_id: req.user.id,
           action: 'ROLE_CHANGED',
           entity: 'profiles',
@@ -1109,17 +1350,35 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
             executed_by_role: req.userRole,
           },
         });
-      } catch (auditErr) {
-        console.warn('[PX CONTROL Users] Aviso ao gravar log de auditoria complementar:', auditErr);
+
+        if (auditError) {
+          auditWarning =
+            auditError.message || 'Falha ao registrar log de auditoria complementar em public.audit_logs.';
+          console.error(
+            '[PX CONTROL Users] Erro retornado pelo Supabase ao gravar log de auditoria complementar:',
+            auditError.message
+          );
+        }
+      } catch (auditErr: any) {
+        auditWarning =
+          auditErr?.message || 'Exceção ao gravar log de auditoria complementar em public.audit_logs.';
+        console.error('[PX CONTROL Users] Exceção ao gravar log de auditoria complementar:', auditErr);
       }
     }
 
     // 10. Buscar perfil atualizado para retorno canônico
-    const { data: finalProfile } = await supabaseAdmin
+    const { data: finalProfile, error: finalProfileError } = await adminDb
       .from('profiles')
       .select('id, email, full_name, phone, cpf, avatar_url, role, is_verified, created_at, updated_at')
       .eq('id', targetUserId)
       .maybeSingle();
+
+    if (finalProfileError) {
+      console.warn(
+        '[PX CONTROL Users] Aviso ao recarregar perfil atualizado após alteração de papel:',
+        finalProfileError.message
+      );
+    }
 
     return res.json({
       success: true,
@@ -1128,6 +1387,7 @@ const handleAdminUserRoleUpdate = async (req: AuthenticatedRequest, res: Respons
       new_role: newRole,
       user: finalProfile || { ...targetProfile, role: newRole },
       message: `Permissão de ${targetProfile.full_name || targetProfile.email} atualizada de ${oldRole} para ${newRole}.`,
+      ...(auditWarning ? { audit_logged: false, audit_warning: auditWarning } : {}),
     });
   } catch (err: any) {
     console.error('[PX CONTROL Users] Exceção ao atualizar papel de usuário:', err);
@@ -2674,7 +2934,9 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Falha ao iniciar servidor PX CUSTON:', err);
-  process.exit(1);
-});
+if (process.env.PX_SKIP_SERVER_AUTOSTART !== 'true') {
+  startServer().catch((err) => {
+    console.error('Falha ao iniciar servidor PX CUSTON:', err);
+    process.exit(1);
+  });
+}
